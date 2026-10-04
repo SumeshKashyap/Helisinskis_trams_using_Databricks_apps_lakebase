@@ -1,12 +1,13 @@
 # Helsinki's trams, live: a streaming lakehouse, Lakebase and a Databricks App, end to end
 
-*DRAFT for review. Screenshots are marked `[SCREENSHOT: …]`.*
+*DRAFT for review.*
 
 Every tram in Helsinki tells the world where it is, about four times a second. Helsinki Region Transport (HSL) publishes those positions on an open MQTT feed, together with how far each tram is from its timetable. I wanted to see how much of a real, near-real-time app I could build on that feed using only Databricks: no Kafka, no extra servers, nothing a reader couldn't deploy from one repository.
 
 The result is a Databricks App with a live map of every tram and metro, a punctuality board, a stop-level lateness map, a chat box that answers "Is tram 4 on time right now?", and a way for riders to report problems that flows back into the lakehouse. This post walks through how it fits together, what each Databricks component does, and what surprised me along the way. Every component section ends with links to the official documentation, so you can dig deeper on your own.
 
-[SCREENSHOT: the app's live map with trams coloured by lateness, the health strip and the My Routes strip]
+![The live map: 113 trams and metro trains coloured by lateness, with the health strip above it and the My Routes filters in the sidebar](screenshots/image1.png)
+*The live map. The health strip shows the feed is live at 377 events per second; grey dots are metro, which has no published lateness.*
 
 The code is on GitHub: [SumeshKashyap/Helisinskis_trams_using_Databricks_apps_lakebase](https://github.com/SumeshKashyap/Helisinskis_trams_using_Databricks_apps_lakebase).
 
@@ -145,6 +146,9 @@ postgres_synced_tables:
 
 The map query against Lakebase takes **about 20 ms** (p95 24 ms). The app (more on Databricks Apps below) is Streamlit with pydeck: trams are coloured by lateness band and fade out as their last position gets older (fully opaque up to 30 s, gone after 5 minutes). When you stop the pipeline you can watch the city slowly go transparent.
 
+![Hovering a tram shows its route, direction, vehicle, lateness and when it was last seen](screenshots/image2.png)
+*Hover a tram for its details: tram 6, direction 2, +1:44 late, last seen 25 s ago. The Report a problem form sits under the map.*
+
 **End-to-end freshness**, from HSL's timestamp to the dot on the map, is about **26 seconds at p95**. Almost all of it is the four streaming hops at a micro-batch cadence of a few seconds each: bronze about 4.5 s, silver 9–12 s, gold about 25 s. The Lakebase sync and the map query add almost nothing. For a demo that's fine. Getting closer to 15 s would mean skipping the silver hop for the current-position table, or [Real-Time Mode](https://docs.databricks.com/aws/en/structured-streaming/real-time/), a Structured Streaming trigger built for sub-second latency.
 
 ## Analytics through a serverless SQL warehouse
@@ -163,7 +167,8 @@ The tabs:
 
 Every query runs in 0.5–2.6 s. The departures chart shades Data Gaps grey, so a flat line during an outage reads as "we weren't listening", not "no trams ran".
 
-[SCREENSHOT: the Punctuality tab with the coverage warning and a shaded Data Gap]
+![The Punctuality tab: on-time window slider, a 16 % coverage warning, overall punctuality and a per-route table](screenshots/image3.png)
+*Punctuality for the last hour: 83 % across 463 departures, with a warning that the feed covered only 16 % of the window.*
 
 The same data also backs an **AI/BI dashboard** (formerly Lakeview), built with no app code at all: datasets are SQL queries, widgets are drag-and-drop, and the on-time window bounds are dashboard parameters. The dashboard is a `.lvdash.json` file deployed by the bundle.
 
@@ -184,7 +189,8 @@ Docs: [Genie Agents](https://docs.databricks.com/aws/en/genie-agents/) · [Conve
 
 The app shows the SQL Genie ran under every answer. That's the single best feature for trusting it.
 
-[SCREENSHOT: Ask tab answering "Is tram 4 on time right now?" with the SQL expanded]
+![The Ask tab answering "Is tram 4 on time right now?" with a per-vehicle table](screenshots/image4.png)
+*Genie's answer names the on-time window it used and shows each tram 4 vehicle with its lateness and when it was last seen.*
 
 ## Writing back: Rider Reports and My Routes
 
@@ -228,7 +234,8 @@ Things that bit me here:
 - **Let the app create its own schemas.** The app's service principal can create objects in Lakebase, but it can't use a schema someone else owns. If you run the app locally first, *you* own the schemas and the deployed app gets `permission denied`. I test SQL on a throwaway Lakebase branch with a 2-hour TTL instead. The app creates its schemas in a small `init_db.py` step before Streamlit starts.
 - **Change Data Feed needs a workspace preview** called *Lakebase Change Data Feed*, on the workspace's Previews page (not the account console). It took a few minutes after enabling before the API accepted calls. Empty tables are skipped, so the history table only appears after the first row.
 
-[SCREENSHOT: report form, purple report ring on the map, and the row in lb_rider_reports_history]
+![A Rider Report on tram 4: a purple ring on the map and the report listed with the lateness measured at that moment](screenshots/image5.png)
+*A Rider Report on tram 4 (vehicle 40/639). The purple ring marks it on the map, and the list shows what the rider said ("Late") next to what we measured (+5:21).*
 
 ## Running it on demand
 
@@ -258,7 +265,6 @@ Vehicle positions and timetables: [Helsinki Region Transport (HSL)](https://www.
 ---
 
 *Review notes (remove before publishing):*
-- *Placeholders: four screenshots.*
 - *Numbers are from 2026-10-03.*
 - *Doc links point to the AWS docs; each page has a cloud selector for Azure and GCP.*
 - *Still open before publishing: the lateness outliers (route 5T averaging about +10 min, route 2 about −18 min) and Jokeri (route 15) departures without stop names. Both show up in the dashboard and Genie answers, so worth checking first.*
