@@ -2,8 +2,9 @@
 
 *DRAFT for review (story version).*
 
-Picture a tram stop in Helsinki on a cold evening. You're looking down the street, wondering whether tram 4 is two minutes away or twelve. Somewhere in that tram, a small computer already knows. About four times a second, it announces where the tram is and how far it is from its timetable. Helsinki Region Transport (HSL) publishes all of those announcements on an open feed that anyone can listen to.
+Picture a tram stop in Helsinki on a cold evening. You're looking down the street, wondering whether tram 4 is two minutes away or twelve. Somewhere in that tram, a small computer already knows. About four times a second, it announces where the tram is and how far it is from its timetable. What if the official Helsinki transport shows tram is on time but it actually is delayed and I as a user want to report it? Would it be nice to see analytics of late trams on route which I am supposed to take for the airport next morning? 
 
+Helsinki Region Transport (HSL) publishes all of those announcements on an open feed that anyone can listen to.
 When I found that feed, one question stuck with me: how much of a real, live app could I build on it using nothing but Databricks? No Kafka cluster on the side, no extra servers, nothing you couldn't deploy yourself from one repository.
 
 This is the story of that build. It ended up as a Databricks App with a live map of every tram and metro train, a punctuality board, a chat box that answers "Is tram 4 on time right now?", and a way for riders to report problems that flows back into the lakehouse. Along the way I'll stop at each Databricks component, explain in a few lines what it is, and leave you a link to the official docs so you can explore further.
@@ -249,6 +250,8 @@ It starts the ingestion pipeline, the Lakebase sync and the app, waits, then sto
 Docs: [Lakeflow Jobs](https://docs.databricks.com/aws/en/jobs)
 
 ## What I'd tell a friend starting the same project
+
+What I really loved on this journey was that once I was clear on what I wanted to build, it took me about 6 hours to build this app.
 
 - **Plan for gaps from day one.** Heartbeats, session ids and a coverage table took one afternoon, and they made every screen after that honest.
 - **Choose where data is served by how it's used.** Lakebase for the 4-second map, the warehouse for big aggregations, Postgres tables for writes. They live together happily in one app.
