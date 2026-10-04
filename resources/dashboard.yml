@@ -1,0 +1,15 @@
+# AI/BI dashboard on gold_departures (FR-11): the "same data, no app code" view for the blog.
+# Queries use bare table names; dataset_catalog/dataset_schema fill them in.
+# Edit it in the UI, then pull changes back with:
+#   databricks bundle generate dashboard --resource hsl_departures --force -t dev
+targets:
+  dev:
+    resources:
+      dashboards:
+        hsl_departures:
+          display_name: HSL tram Punctuality
+          file_path: ../src/dashboards/departures.lvdash.json
+          warehouse_id: ${resources.sql_warehouses.hsl_analytics.id}
+          dataset_catalog: ${var.catalog}
+          dataset_schema: ${var.schema}
+          embed_credentials: false  # viewers query with their own permissions

@@ -1,0 +1,761 @@
+{
+  "datasets": [
+    {
+      "name": "ds_departures",
+      "displayName": "Tram departures",
+      "queryLines": [
+        "SELECT d.operating_day, d.route, d.direction, d.route_name, d.stop_id, d.stop_name,\n",
+        "       d.stop_lat, d.stop_long, d.departed_at_local,\n",
+        "       date_trunc('HOUR', d.departed_at_local) AS hour_local,\n",
+        "       d.lateness_s,\n",
+        "       CASE WHEN d.lateness_s BETWEEN :early_s AND :late_s THEN 'On-time' ELSE 'Not on-time' END AS status,\n",
+        "       CASE WHEN d.lateness_s BETWEEN :early_s AND :late_s THEN 1 ELSE 0 END AS on_time\n",
+        "FROM gold_departures d\n"
+      ],
+      "parameters": [
+        {
+          "keyword": "early_s",
+          "displayName": "early_s",
+          "dataType": "INTEGER",
+          "defaultSelection": {
+            "values": {
+              "dataType": "INTEGER",
+              "values": [
+                {
+                  "value": "-60"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "keyword": "late_s",
+          "displayName": "late_s",
+          "dataType": "INTEGER",
+          "defaultSelection": {
+            "values": {
+              "dataType": "INTEGER",
+              "values": [
+                {
+                  "value": "180"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "columns": [
+        {
+          "displayName": "Punctuality",
+          "description": "Share of departures inside the On-time window; unknown Lateness counts as not on-time.",
+          "expression": "AVG(`on_time`)"
+        }
+      ]
+    },
+    {
+      "name": "ds_coverage",
+      "displayName": "Coverage per Operating Day",
+      "queryLines": [
+        "WITH m AS (\n",
+        "  SELECT to_date(timestampadd(MINUTE, -270, from_utc_timestamp(c.minute_start, 'Europe/Helsinki'))) AS operating_day,\n",
+        "         c.covered_s\n",
+        "  FROM gold_coverage_minutely c\n",
+        ")\n",
+        "SELECT m.operating_day,\n",
+        "       sum(m.covered_s) AS covered_s,\n",
+        "       max(unix_timestamp(least(current_timestamp(),\n",
+        "             to_utc_timestamp(timestampadd(MINUTE, 270, timestamp(date_add(m.operating_day, 1))), 'Europe/Helsinki')))\n",
+        "           - unix_timestamp(to_utc_timestamp(timestampadd(MINUTE, 270, timestamp(m.operating_day)), 'Europe/Helsinki'))) AS window_s\n",
+        "FROM m\n",
+        "GROUP BY m.operating_day\n"
+      ],
+      "columns": [
+        {
+          "displayName": "Coverage",
+          "description": "Share of the selected Operating Days recorded by an Ingestion Session.",
+          "expression": "SUM(`covered_s`) / SUM(`window_s`)"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "punctuality",
+      "displayName": "Punctuality",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## HSL tram Punctuality\n",
+                "\n",
+                "Departures of Helsinki trams from the `hsl_live_transit` gold tables. A departure is **On-time** when its Lateness is inside the window below (seconds; negative = early). Metro isn't here: HSL publishes no metro Lateness. **Coverage** is the share of the selected days the feed was recorded; below 100 % the numbers miss departures from Data Gaps. Data: Helsinki Region Transport (HSL), CC BY 4.0."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_day",
+            "queries": [
+              {
+                "name": "dep_day",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "operating_day",
+                      "expression": "`operating_day`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "cov_day",
+                "query": {
+                  "datasetName": "ds_coverage",
+                  "fields": [
+                    {
+                      "name": "operating_day",
+                      "expression": "`operating_day`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "operating_day",
+                    "queryName": "dep_day"
+                  },
+                  {
+                    "fieldName": "operating_day",
+                    "queryName": "cov_day"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Operating Day"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_route",
+            "queries": [
+              {
+                "name": "dep_route",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "route",
+                      "expression": "`route`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "route",
+                    "displayName": "Route",
+                    "queryName": "dep_route"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Route"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 3,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_early",
+            "queries": [
+              {
+                "name": "p_early_s",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "parameters": [
+                    {
+                      "name": "early_s",
+                      "keyword": "early_s"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-text-entry",
+              "encodings": {
+                "fields": [
+                  {
+                    "parameterName": "early_s",
+                    "queryName": "p_early_s"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "On-time from (s)"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "filter_late",
+            "queries": [
+              {
+                "name": "p_late_s",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "parameters": [
+                    {
+                      "name": "late_s",
+                      "keyword": "late_s"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-text-entry",
+              "encodings": {
+                "fields": [
+                  {
+                    "parameterName": "late_s",
+                    "queryName": "p_late_s"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "On-time until (s)"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 3,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_punct",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "measure(Punctuality)",
+                      "expression": "MEASURE(`Punctuality`)"
+                    },
+                    {
+                      "name": "daily(operating_day)",
+                      "expression": "DATE_TRUNC(\"DAY\", `operating_day`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Punctuality)",
+                  "displayName": "Punctuality",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 0
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(operating_day)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Punctuality"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_departures",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(*)"
+                    },
+                    {
+                      "name": "daily(operating_day)",
+                      "expression": "DATE_TRUNC(\"DAY\", `operating_day`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)",
+                  "displayName": "Departures",
+                  "format": {
+                    "type": "number",
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 1
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(operating_day)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Departures"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_lateness",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "avg(lateness_s)",
+                      "expression": "AVG(`lateness_s`)"
+                    },
+                    {
+                      "name": "daily(operating_day)",
+                      "expression": "DATE_TRUNC(\"DAY\", `operating_day`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(lateness_s)",
+                  "displayName": "Average Lateness (s)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 0
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(operating_day)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Average Lateness (s)"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_coverage",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_coverage",
+                  "fields": [
+                    {
+                      "name": "measure(Coverage)",
+                      "expression": "MEASURE(`Coverage`)"
+                    },
+                    {
+                      "name": "daily(operating_day)",
+                      "expression": "DATE_TRUNC(\"DAY\", `operating_day`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Coverage)",
+                  "displayName": "Coverage",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 0
+                    }
+                  }
+                },
+                "period": {
+                  "fieldName": "daily(operating_day)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Coverage"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_route",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "route",
+                      "expression": "`route`"
+                    },
+                    {
+                      "name": "measure(Punctuality)",
+                      "expression": "MEASURE(`Punctuality`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "route",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "value"
+                    }
+                  },
+                  "displayName": "Route"
+                },
+                "y": {
+                  "fieldName": "measure(Punctuality)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Punctuality",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 0
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Punctuality by Route"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_hour",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "hour_local",
+                      "expression": "`hour_local`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(*)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "hour_local",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Hour (Helsinki)"
+                },
+                "y": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Departures"
+                },
+                "color": {
+                  "fieldName": "status",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "On-time",
+                        "color": "#009E73"
+                      },
+                      {
+                        "value": "Not on-time",
+                        "color": "#E69F00"
+                      }
+                    ]
+                  },
+                  "displayName": "Departure"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Departures per hour"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "map_stops",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_departures",
+                  "fields": [
+                    {
+                      "name": "stop_lat",
+                      "expression": "`stop_lat`"
+                    },
+                    {
+                      "name": "stop_long",
+                      "expression": "`stop_long`"
+                    },
+                    {
+                      "name": "avg(lateness_s)",
+                      "expression": "AVG(`lateness_s`)"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(*)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "symbol-map",
+              "encodings": {
+                "coordinates": {
+                  "latitude": {
+                    "fieldName": "stop_lat"
+                  },
+                  "longitude": {
+                    "fieldName": "stop_long"
+                  }
+                },
+                "color": {
+                  "fieldName": "avg(lateness_s)",
+                  "displayName": "Average Lateness (s)",
+                  "scale": {
+                    "type": "quantitative",
+                    "colorRamp": {
+                      "mode": "custom-sequential",
+                      "colors": {
+                        "start": "#009E73",
+                        "end": "#D55E00"
+                      }
+                    }
+                  }
+                },
+                "size": {
+                  "fieldName": "count(*)",
+                  "displayName": "Departures",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "mark": {
+                "opacity": 0.75
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Average departure Lateness per Stop"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 8
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#FCFCFC",
+        "dark": "#1F272D"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "fontColor": {
+        "light": "#11171C",
+        "dark": "#E8ECF0"
+      },
+      "selectionColor": {
+        "light": "#2272B4",
+        "dark": "#8ACAFF"
+      },
+      "visualizationColors": [
+        "#0072B2",
+        "#E69F00",
+        "#009E73",
+        "#CC79A7",
+        "#56B4E9",
+        "#D55E00",
+        "#F0E442"
+      ],
+      "widgetHeaderAlignment": "LEFT"
+    }
+  }
+}

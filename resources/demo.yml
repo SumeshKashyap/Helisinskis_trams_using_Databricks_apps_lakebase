@@ -1,0 +1,85 @@
+# Demo session (NFR-4, Q1): one run starts the ingestion pipeline, the Lakebase sync and the app,
+# keeps them up for max_minutes (default 20) and stops all three. demo_stop ends a demo early.
+#   databricks bundle run demo_session -t dev [--params max_minutes=45]
+#   databricks bundle run demo_stop -t dev
+# Under targets.dev because the Lakebase synced table and the app are dev-only resources.
+targets:
+  dev:
+    resources:
+      jobs:
+        demo_session:
+          name: hsl_demo_session_${var.schema}
+          max_concurrent_runs: 1
+          parameters:
+            - name: max_minutes
+              default: "20"
+          environments:
+            - environment_key: default
+              spec:
+                client: "4"
+                dependencies:
+                  - databricks-sdk>=0.81.0  # w.postgres (synced tables)
+          tasks:
+            - task_key: start
+              environment_key: default
+              spark_python_task:
+                python_file: ../src/jobs/demo.py
+                parameters:
+                  - start
+                  - --pipeline-id=${resources.pipelines.hsl_live_transit.id}
+                  - --synced-table=${var.catalog}.${var.schema}.gold_vehicle_current_online
+                  - --app=${resources.apps.hsl_live_transit_app.name}
+                  - --catalog=${var.catalog}
+                  - --schema=${var.schema}
+                  - --daily-job-id=${resources.jobs.hsl_daily.id}
+            - task_key: hold
+              depends_on:
+                - task_key: start
+              environment_key: default
+              spark_python_task:
+                python_file: ../src/jobs/demo.py
+                parameters:
+                  - hold
+                  - --pipeline-id=${resources.pipelines.hsl_live_transit.id}
+                  - --synced-table=${var.catalog}.${var.schema}.gold_vehicle_current_online
+                  - --app=${resources.apps.hsl_live_transit_app.name}
+                  - --catalog=${var.catalog}
+                  - --schema=${var.schema}
+                  - --max-minutes={{job.parameters.max_minutes}}
+                  - --run-start-ms={{job.start_time.timestamp_ms}}
+            # Runs even if start or hold failed, so nothing is left running (NFR-4).
+            - task_key: stop
+              depends_on:
+                - task_key: hold
+              run_if: ALL_DONE
+              environment_key: default
+              spark_python_task:
+                python_file: ../src/jobs/demo.py
+                parameters:
+                  - stop
+                  - --pipeline-id=${resources.pipelines.hsl_live_transit.id}
+                  - --synced-table=${var.catalog}.${var.schema}.gold_vehicle_current_online
+                  - --app=${resources.apps.hsl_live_transit_app.name}
+                  - --catalog=${var.catalog}
+                  - --schema=${var.schema}
+
+        demo_stop:
+          name: hsl_demo_stop_${var.schema}
+          environments:
+            - environment_key: default
+              spec:
+                client: "4"
+                dependencies:
+                  - databricks-sdk>=0.81.0
+          tasks:
+            - task_key: stop
+              environment_key: default
+              spark_python_task:
+                python_file: ../src/jobs/demo.py
+                parameters:
+                  - stop
+                  - --pipeline-id=${resources.pipelines.hsl_live_transit.id}
+                  - --synced-table=${var.catalog}.${var.schema}.gold_vehicle_current_online
+                  - --app=${resources.apps.hsl_live_transit_app.name}
+                  - --catalog=${var.catalog}
+                  - --schema=${var.schema}

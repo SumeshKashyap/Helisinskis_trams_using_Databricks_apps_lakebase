@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    hsl_live_transit_schema:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: HSL Live Transit - bronze, silver and gold tables for Helsinki trams and metro.

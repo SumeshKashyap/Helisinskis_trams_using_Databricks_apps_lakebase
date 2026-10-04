@@ -1,0 +1,151 @@
+# Genie space behind the app's Ask tab (FR-12). It reads the gold Delta tables through the
+# analytics warehouse, never Lakebase (FR-6.2). Instructions follow CONTEXT.md.
+# serialized_space rules: ids are 32 lowercase hex chars; every id-keyed list is sorted by id,
+# tables by identifier and column_configs by column_name.
+targets:
+  dev:
+    resources:
+      genie_spaces:
+        hsl_ask:
+          title: HSL Live Transit
+          description: Ask about Helsinki trams and metro, from the hsl_live_transit gold tables.
+          warehouse_id: ${resources.sql_warehouses.hsl_analytics.id}
+          serialized_space:
+            version: 2
+            config:
+              sample_questions:
+                - id: "a0000000000000000000000000000001"
+                  question: ["Is tram 4 on time right now?"]
+                - id: "a0000000000000000000000000000002"
+                  question: ["Which tram routes were most late today?"]
+                - id: "a0000000000000000000000000000003"
+                  question: ["Which stops had the worst Lateness in the last hour?"]
+            data_sources:
+              tables:
+                - identifier: ${var.catalog}.${var.schema}.gold_coverage_minutely
+                  description:
+                    - "Seconds of each UTC minute covered by an Ingestion Session. coverage = covered_s / 60.
+                      Minutes with coverage 0 are Data Gaps: the feed wasn't recorded, so trams are missing, not absent."
+                - identifier: ${var.catalog}.${var.schema}.gold_departures
+                  description:
+                    - "One row per tram departure Stop Event, with stop and route names. Trams only: metro has no Stop Events.
+                      Use this for Punctuality and stop-level questions."
+                  column_configs:
+                    - column_name: departed_at
+                      description: ["UTC time the tram departed the stop. Convert with from_utc_timestamp(departed_at, 'Europe/Helsinki') for display."]
+                    - column_name: departed_at_local
+                      description: ["Departure time in Helsinki local time."]
+                    - column_name: lateness_s
+                      description: ["Lateness in seconds at departure: positive = late, negative = early. It is HSL's dl negated."]
+                      synonyms: ["delay", "late by", "behind schedule"]
+                    - column_name: operating_day
+                      description: ["HSL Operating Day of the journey. Journeys after midnight belong to the previous day until 04:30 Helsinki."]
+                    - column_name: route
+                      description: ["Route short name riders know, e.g. '4', '10', '5T'. 'Tram 4' means route = '4'."]
+                      enable_entity_matching: true
+                      enable_format_assistance: true
+                    - column_name: stop_name
+                      enable_entity_matching: true
+                    - column_name: timetable_lateness_s
+                      description: ["Lateness against the public timetable in whole minutes. Only for comparison; answer with lateness_s."]
+                - identifier: ${var.catalog}.${var.schema}.gold_vehicle_current
+                  description:
+                    - "Latest Position Event per Vehicle (one row each, trams and metro). Use this for 'right now' questions.
+                      A vehicle not seen for over 5 minutes is no longer on the map and shouldn't be reported as current."
+                  column_configs:
+                    - column_name: last_seen_at
+                      description: ["UTC time of the vehicle's latest Position Event."]
+                    - column_name: lateness_s
+                      description: ["Current Lateness in seconds: positive = late, negative = early. Always NULL for metro: HSL doesn't publish it."]
+                      synonyms: ["delay", "late by", "behind schedule"]
+                    - column_name: mode
+                      description: ["'tram' or 'metro'."]
+                      enable_format_assistance: true
+                    - column_name: route
+                      description: ["Route short name riders know, e.g. '4', '10', 'M1'. 'Tram 4' means mode = 'tram' AND route = '4'."]
+                      enable_entity_matching: true
+                      enable_format_assistance: true
+                - identifier: ${var.catalog}.${var.schema}.lb_rider_reports_history
+                  description:
+                    - "Rider Reports (FR-13): problems riders reported in the app about one Vehicle, copied from Lakebase by
+                      Lakebase Change Data Feed. One row per change; reports are insert-only, so use _pg_change_type = 'insert'.
+                      measured_lateness_s is what we measured for that Vehicle when the report was sent."
+                  column_configs:
+                    - column_name: category
+                      description: ["What the rider reported: late, early, crowded, skipped_stop, breakdown or other."]
+                      enable_format_assistance: true
+                    - column_name: measured_lateness_s
+                      description: ["Lateness we measured for the Vehicle at report time; positive = late. NULL for metro."]
+                    - column_name: reported_at
+                      description: ["UTC time the rider sent the report."]
+                    - column_name: reporter_id
+                      exclude: true
+                - identifier: ${var.catalog}.${var.schema}.silver_routes
+                  description: ["Tram and metro Routes from HSL GTFS: short name (route) and full name (route_name)."]
+                - identifier: ${var.catalog}.${var.schema}.silver_stops
+                  description: ["All HSL Stops from GTFS with names and coordinates."]
+            instructions:
+              text_instructions:
+                - id: "b0000000000000000000000000000001"
+                  content:
+                    - "Vocabulary: say Lateness (never delay), Route (never line), Stop Event, Punctuality, Coverage, Data Gap.\n"
+                    - "Lateness is in seconds; positive means late, negative means early. Show it in minutes and seconds in answers, e.g. +2:05 late.\n"
+                    - "On-time means Lateness between -60 s and +180 s, inclusive. Always say which On-time window you used. Very late is over 600 s.\n"
+                    - "Unknown Lateness (NULL) is never on-time. Metro Lateness is always NULL because HSL doesn't publish it: for metro questions answer 'Lateness is not published for metro' and never call metro on time or late.\n"
+                    - "Punctuality is the share of departures in gold_departures whose lateness_s is in the On-time window; count NULL lateness_s as not on-time. It exists for trams only.\n"
+                    - "'Right now' or 'currently': use gold_vehicle_current with last_seen_at in the last 5 minutes, and always include the last_seen time in Helsinki time and the seconds since it. If nothing was seen in the last 5 minutes, don't answer yes or no: say the live feed isn't running, so current Lateness is unknown, and give the route's latest last_seen time in Helsinki time.\n"
+                    - "'Today' means the current Operating Day: operating_day = to_date(from_utc_timestamp(current_timestamp(), 'Europe/Helsinki') - INTERVAL 270 MINUTES).\n"
+                    - "Show times in Helsinki time (Europe/Helsinki). Timestamps in the tables are UTC.\n"
+                    - "Every answer about a time window (today, the last hour, …) must also query its Coverage from gold_coverage_minutely (covered seconds / window seconds) and state it. Below 90%, add that data from Data Gaps is missing, not zero.\n"
+                    - "Rider Reports (lb_rider_reports_history) are claims by riders, never measurements: never mix them into Lateness or Punctuality. When asked whether riders were right, compare category with measured_lateness_s using the On-time window.\n"
+                    - "'Tram 4', 'line 4' and 'route 4' all mean route = '4'. Data is from Helsinki Region Transport (HSL), CC BY 4.0."
+              example_question_sqls:
+                - id: "c0000000000000000000000000000001"
+                  question: ["Is tram 4 on time right now?"]
+                  sql:
+                    - "SELECT v.route, v.direction, v.vehicle_id, v.lateness_s,\n"
+                    - "  CASE WHEN v.lateness_s IS NULL THEN 'lateness not published' WHEN v.lateness_s < -60 THEN 'early'\n"
+                    - "       WHEN v.lateness_s <= 180 THEN 'on-time' WHEN v.lateness_s <= 600 THEN 'late' ELSE 'very late' END AS status,\n"
+                    - "  from_utc_timestamp(v.last_seen_at, 'Europe/Helsinki') AS last_seen_helsinki,\n"
+                    - "  timestampdiff(SECOND, v.last_seen_at, current_timestamp()) AS seconds_since_last_seen\n"
+                    - "FROM ${var.catalog}.${var.schema}.gold_vehicle_current v\n"
+                    - "WHERE v.mode = 'tram' AND v.route = '4' AND v.last_seen_at > current_timestamp() - INTERVAL 5 MINUTES\n"
+                    - "ORDER BY v.direction, v.lateness_s DESC"
+                - id: "c0000000000000000000000000000002"
+                  question: ["Which tram routes were most late today?", "What is the Punctuality per tram route today?"]
+                  sql:
+                    - "SELECT d.route, d.direction, max(d.route_name) AS route_name, count(*) AS departures,\n"
+                    - "  round(100 * count_if(d.lateness_s BETWEEN -60 AND 180) / count(*), 1) AS punctuality_pct,\n"
+                    - "  round(avg(d.lateness_s)) AS avg_lateness_s\n"
+                    - "FROM ${var.catalog}.${var.schema}.gold_departures d\n"
+                    - "WHERE d.operating_day = to_date(from_utc_timestamp(current_timestamp(), 'Europe/Helsinki') - INTERVAL 270 MINUTES)\n"
+                    - "GROUP BY d.route, d.direction\n"
+                    - "ORDER BY punctuality_pct ASC"
+                - id: "c0000000000000000000000000000003"
+                  question: ["Which stops had the worst Lateness in the last hour?"]
+                  sql:
+                    - "SELECT d.stop_name, d.stop_id, count(*) AS departures, round(avg(d.lateness_s)) AS avg_lateness_s,\n"
+                    - "  array_join(sort_array(collect_set(d.route)), ', ') AS routes\n"
+                    - "FROM ${var.catalog}.${var.schema}.gold_departures d\n"
+                    - "WHERE d.departed_at >= current_timestamp() - INTERVAL 1 HOUR\n"
+                    - "GROUP BY d.stop_name, d.stop_id\n"
+                    - "HAVING count(*) >= 3\n"
+                    - "ORDER BY avg_lateness_s DESC\n"
+                    - "LIMIT 10"
+                - id: "c0000000000000000000000000000004"
+                  question: ["What was the Coverage in the last hour?", "Was the feed recorded all of the last hour?"]
+                  sql:
+                    - "SELECT round(coalesce(sum(c.covered_s), 0) / 3600, 3) AS coverage\n"
+                    - "FROM ${var.catalog}.${var.schema}.gold_coverage_minutely c\n"
+                    - "WHERE c.minute_start >= date_trunc('MINUTE', current_timestamp() - INTERVAL 1 HOUR)"
+                - id: "c0000000000000000000000000000005"
+                  question: ["Do Rider Reports match measured Lateness?", "Were riders right when they reported late trams?"]
+                  sql:
+                    - "SELECT r.category, count(*) AS reports, round(avg(r.measured_lateness_s)) AS avg_measured_lateness_s,\n"
+                    - "  count_if(r.measured_lateness_s BETWEEN -60 AND 180) AS measured_on_time,\n"
+                    - "  count_if(r.measured_lateness_s > 180) AS measured_late,\n"
+                    - "  count_if(r.measured_lateness_s IS NULL) AS lateness_not_published\n"
+                    - "FROM ${var.catalog}.${var.schema}.lb_rider_reports_history r\n"
+                    - "WHERE r._pg_change_type = 'insert'\n"
+                    - "GROUP BY r.category\n"
+                    - "ORDER BY reports DESC"

@@ -1,0 +1,68 @@
+bundle:
+  name: hsl_live_transit
+
+include:
+  - resources/*.yml
+
+artifacts:
+  # R8: the Python Data Source worker can't import workspace files, so ship it as a wheel.
+  hsl_mqtt_source:
+    type: whl
+    build: uv build --wheel
+    path: .
+    dynamic_version: true  # serverless caches wheels by version; re-install on every deploy
+
+sync:
+  exclude:
+    - scratchpad/**
+    - tests/**
+
+variables:
+  catalog:
+    description: Unity Catalog catalog. Always my_databricks_workspace, never main.
+    default: my_databricks_workspace
+  schema:
+    description: Schema holding every pipeline table.
+    default: hsl_live_transit
+  transport:
+    description: MQTT transport, tls (port 8883) or wss (port 443).
+    default: tls
+  replay_path:
+    description: Optional JSONL fixture path. When set, the source replays it instead of connecting to MQTT.
+    default: ""
+  reference_schema:
+    description: Schema holding silver_stops / silver_routes from the daily GTFS job.
+    default: hsl_live_transit
+  gtfs_url:
+    description: HSL static GTFS zip (R6). Data is CC BY 4.0, attribute HSL.
+    default: https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+  lakebase_project:
+    description: Lakebase Autoscaling project id (live map serving, ADR-0003).
+    default: hsl-live-transit
+  daily_job_pause_status:
+    description: Schedule state of the daily GTFS + retention job.
+    default: UNPAUSED
+
+targets:
+  dev:
+    # Not `mode: development`: it would rename the schema to dev_<user>_hsl_live_transit,
+    # and the schema must be exactly my_databricks_workspace.hsl_live_transit.
+    default: true
+    presets:
+      pipelines_development: true
+    workspace:
+      host: https://adb-7405611495879743.3.azuredatabricks.net
+      profile: dev
+
+  # Replays the Phase 0 fixtures (NFR-7) into its own schema, so recorded data never mixes
+  # with live data. Reuses the live GTFS tables; its daily job stays paused.
+  replay:
+    presets:
+      pipelines_development: true
+    workspace:
+      host: https://adb-7405611495879743.3.azuredatabricks.net
+      profile: dev
+    variables:
+      schema: hsl_live_transit_replay
+      replay_path: /Volumes/my_databricks_workspace/hsl_spike/raw/hfp_samples/20260926T182830Z
+      daily_job_pause_status: PAUSED

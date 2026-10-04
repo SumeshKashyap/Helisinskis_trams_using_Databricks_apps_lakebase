@@ -1,0 +1,300 @@
+"""Runs src/app/app.py headless against fake Lakebase, SQL Warehouse and Genie backends.
+
+Run with the Streamlit version of the Databricks Apps runtime (1.38), which is older than PyPI's:
+    uv run --no-project --with pytest --with streamlit==1.38.0 --with pydeck --with pandas --with databricks-sdk python -m pytest tests/test_app_smoke.py
+"""
+
+import datetime as dt
+import sys
+import types
+from pathlib import Path
+from typing import ClassVar
+
+import pytest
+
+pytest.importorskip("streamlit")
+pytest.importorskip("pydeck")
+
+import pandas as pd
+
+APP_DIR = Path(__file__).parents[1] / "src" / "app"
+sys.path.insert(0, str(APP_DIR))
+COLUMNS = [
+    "vehicle_id",
+    "mode",
+    "route",
+    "direction",
+    "lat",
+    "long",
+    "heading",
+    "lateness_s",
+    "last_seen_at",
+    "age_s",
+]
+NOW = dt.datetime.now(dt.UTC)
+
+
+REPORT_COLUMNS = [
+    "report_id", "reported_at", "vehicle_id", "mode", "route", "direction", "category", "note",
+    "measured_lateness_s", "lat", "long", "age_s",
+]  # fmt: skip
+
+
+class FakeCursor:
+    def __init__(self, db):
+        self.db = db
+        self.result = None
+
+    def execute(self, sql, params=None):
+        self.db.executed.append((sql, params))
+        if "count(*) FILTER" in sql:
+            self.result = (self.db.reports_last_hour, 0)
+        elif "INSERT INTO hsl_reports.rider_reports" in sql:
+            self.result = (42,)
+            self.db.reports.append(params)
+        else:
+            self.result = None
+
+    def fetchone(self):
+        return self.result
+
+
+class FakeLakebase:
+    """Answers the live map, Rider Reports and My Routes queries; records writes."""
+
+    instances: ClassVar[list] = []
+
+    def __init__(self):
+        self.executed = []
+        self.reports = []
+        self.reports_last_hour = 0
+        self.watched = ["3"]
+        FakeLakebase.instances.append(self)
+
+    def query(self, sql, params=None):
+        self.executed.append((sql, params))
+        if "FROM hsl_reports.rider_reports" in sql:
+            note = "<script>alert(1)</script>"
+            return REPORT_COLUMNS, [
+                (7, NOW, "40/75", "tram", "3", "2", "crowded", note, 75, 60.18, 24.95, 90.0)
+            ]
+        if "FROM hsl_users.watched_routes" in sql:
+            return ["route"], [(r,) for r in self.watched]
+        if "SELECT DISTINCT route" in sql:
+            return ["route"], [("3",), ("8",), ("9",), ("M1",)]
+        rows = [
+            ("40/75", "tram", "3", "2", 60.18, 24.95, 222, 75, NOW, 5.0),
+            ("50/169", "metro", "M1", "2", 60.17, 24.80, 261, None, NOW, 12.0),  # no Lateness
+            ("40/81", "tram", "8", "1", 60.19, 24.93, 90, 700, NOW - dt.timedelta(seconds=120), 120.0),  # fading
+            ("40/99", "tram", "9", "1", 60.19, 24.93, 90, 0, NOW - dt.timedelta(seconds=400), 400.0),  # hidden
+        ]  # fmt: skip
+        return COLUMNS, rows
+
+    def transaction(self, fn):
+        return fn(FakeCursor(self))
+
+
+class FakeWarehouse:
+    """Answers each analytics query by recognising the table and columns it asks for."""
+
+    def __init__(self, coverage_s=600.0, live=True):
+        self.coverage_s = coverage_s
+        self.live = live
+        self.queries = []
+
+    def table(self, name):
+        return name
+
+    def query(self, statement, params=None):
+        self.queries.append((statement, params))
+        ts = pd.Timestamp(NOW)
+        if "last_minute" in statement:  # health strip
+            hb = ts if self.live else ts - pd.Timedelta(minutes=10)
+            return pd.DataFrame(
+                [
+                    {
+                        "last_heartbeat_at": hb,
+                        "events_per_s": 412.0,
+                        "last_event_at": hb,
+                        "last_gap_start": ts - pd.Timedelta(hours=1),
+                        "last_gap_minutes": 13,
+                        "now": ts,
+                    }
+                ]
+            )
+        if "AS covered_s" in statement:
+            return pd.DataFrame({"covered_s": [self.coverage_s]})
+        if "c.coverage = 0" in statement:
+            return pd.DataFrame({"minute_start": [ts.floor("min") - pd.Timedelta(minutes=20)]})
+        if "AS punctuality" in statement:
+            return pd.DataFrame(
+                {
+                    "route": ["10", "4", "4"],
+                    "route_name": ["Ullanlinna - Pikku Huopalahti", "Katajanokka - Munkkiniemi", None],
+                    "direction": ["1", "1", "2"],
+                    "departures": [10, 20, 30],
+                    "punctuality": [0.5, 0.75, 1.0],
+                    "avg_lateness_s": [200.0, 30.0, -5.0],
+                    "p90_lateness_s": [400, 120, 50],
+                    "lateness_unknown": [0, 1, 0],
+                }
+            )
+        if "bucket_start" in statement:
+            return pd.DataFrame(
+                {
+                    "bucket_start": [ts.floor("5min") - pd.Timedelta(minutes=5)],
+                    "departures": [12],
+                    "on_time": [9],
+                }
+            )
+        if "AS routes" in statement:
+            return pd.DataFrame(
+                {
+                    "stop_id": ["1020455"],
+                    "stop_name": ["Senaatintori"],
+                    "lat": [60.169],
+                    "long": [24.95],
+                    "departures": [4],
+                    "avg_lateness_s": [15.25],
+                    "routes": ["4, 7"],
+                }
+            )
+        if "silver_routes" in statement:
+            return pd.DataFrame({"route": ["10", "4", "1"]})
+        raise AssertionError(f"unexpected query: {statement}")
+
+
+@pytest.fixture
+def run_app(monkeypatch):
+    def run(warehouse=None, genie_space="space-1", viewer="rider@example.com"):
+        warehouse = warehouse or FakeWarehouse()
+        FakeLakebase.instances.clear()
+        if viewer:
+            monkeypatch.setenv("HSL_DEV_VIEWER_EMAIL", viewer)
+        else:
+            monkeypatch.delenv("HSL_DEV_VIEWER_EMAIL", raising=False)
+        monkeypatch.setitem(sys.modules, "db", types.SimpleNamespace(Lakebase=FakeLakebase))
+        monkeypatch.setitem(sys.modules, "warehouse", types.SimpleNamespace(Warehouse=lambda: warehouse))
+        if genie_space:
+            monkeypatch.setenv("GENIE_SPACE_ID", genie_space)
+        else:
+            monkeypatch.delenv("GENIE_SPACE_ID", raising=False)
+        monkeypatch.syspath_prepend(str(APP_DIR))
+        import streamlit as st
+        from streamlit.testing.v1 import AppTest
+
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=30).run()
+        assert not at.exception, [e.value for e in at.exception]
+        return at, warehouse
+
+    return run
+
+
+def test_app_renders_without_exceptions(run_app):
+    at, _ = run_app()
+    assert not at.error, [e.value for e in at.error]
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["Vehicles on map"] == "3"  # the 400 s old vehicle is hidden
+    assert metrics["Fresh (≤ 30 s)"] == "2"
+    assert metrics["Punctuality, all tram routes"] == "83%"  # (5 + 15 + 30) / 60
+    assert metrics["Departures"] == "60"
+    assert [t.label for t in at.tabs] == ["Live map", "Punctuality", "Stop Lateness", "Ask"]
+
+
+def test_low_coverage_warns(run_app):
+    at, _ = run_app(FakeWarehouse(coverage_s=60.0))
+    assert any("Coverage of this window" in w.value for w in at.warning)
+
+
+def test_on_time_slider_requeries(run_app):
+    at, wh = run_app()
+    at.slider(key="punct_on_time").set_value((-30, 120)).run()
+    assert not at.exception
+    sent = [p for q, p in wh.queries if "AS punctuality" in q]
+    assert sent[-1]["early_s"] == -30 and sent[-1]["late_s"] == 120
+
+
+def test_stopped_pipeline_warns_in_ask(run_app):
+    at, _ = run_app(FakeWarehouse(live=False))
+    assert any("pipeline is stopped" in w.value for w in at.warning)
+
+
+def test_ask_shows_genie_answer_and_survives_errors(run_app, monkeypatch):
+    import genie
+
+    calls = []
+
+    class FakeGenie:
+        def ask(self, question, conversation_id=None):
+            calls.append((question, conversation_id))
+            if "boom" in question:
+                raise RuntimeError("Genie timed out")
+            return genie.Answer(
+                conversation_id="conv-1",
+                text="Tram 4 is on time.",
+                sql="SELECT 1",
+                table=pd.DataFrame({"route": ["4"], "lateness_s": [12]}),
+            )
+
+    monkeypatch.setattr(genie, "Genie", FakeGenie)
+    at, _ = run_app()
+    at.chat_input(key="ask_input").set_value("Is tram 4 on time right now?").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Tram 4 is on time." in m.value for m in at.markdown)
+    at.chat_input(key="ask_input").set_value("boom").run()
+    assert not at.exception
+    assert any("Genie couldn't answer" in e.value for e in at.error)
+    assert calls[1] == ("boom", "conv-1")  # follow-up stays in the conversation
+
+
+def test_ask_without_genie_space(run_app):
+    at, _ = run_app(genie_space=None)
+    assert any("Ask isn't configured" in i.value for i in at.info)
+
+
+def test_rider_report_is_written_with_hashed_reporter(run_app):
+    at, _ = run_app()
+    assert not at.error, [e.value for e in at.error]
+    at.selectbox(key="report_route").set_value("3").run()
+    at.radio(key="report_category").set_value("late").run()
+    at.text_input(key="report_note").set_value("stuck at Kallio").run()
+    at.button(key="report_send").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Report #42 saved" in s.value for s in at.success)
+    db = FakeLakebase.instances[-1]
+    reporter, category, note, vehicle = db.reports[-1]
+    assert (category, note, vehicle) == ("late", "stuck at Kallio", "40/75")
+    assert reporter != "rider@example.com" and len(reporter) == 64  # FR-13.3: SHA-256, never the email
+
+
+def test_rate_limited_report_shows_warning(run_app):
+    at, _ = run_app()
+    FakeLakebase.instances[-1].reports_last_hour = 20
+    at.button(key="report_send").click().run()
+    assert any("limit" in w.value for w in at.warning)
+    assert not FakeLakebase.instances[-1].reports
+
+
+def test_report_note_is_escaped_in_tooltip(run_app):
+    at, _ = run_app()
+    decks = [d.proto.json for d in at.get("deck_gl_json_chart")]
+    live = next(d for d in decks if "Rider Report" in d)
+    assert "&lt;script&gt;" in live and "<script>" not in live  # viewer text never becomes HTML
+
+
+def test_my_routes_strip_and_saving(run_app):
+    at, _ = run_app()
+    assert any("Route 3" in m.value for m in at.markdown)  # FR-14.2 strip for the saved route
+    at.multiselect(key="my_routes_picker").set_value(["3", "M1"]).run()
+    assert not at.exception, [e.value for e in at.exception]
+    writes = [
+        p for sql, p in FakeLakebase.instances[-1].executed if "INSERT INTO hsl_users.watched_routes" in sql
+    ]
+    assert ("rider@example.com", "M1") in writes
+
+
+def test_anonymous_viewer_cannot_report(run_app):
+    at, _ = run_app(viewer=None)
+    assert any("Sign in through Databricks to send Rider Reports" in i.value for i in at.info)

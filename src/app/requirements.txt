@@ -1,0 +1,5 @@
+psycopg[binary]>=3.2
+databricks-sdk>=0.81.0
+databricks-sql-connector>=3.0
+pydeck>=0.9
+streamlit>=1.38

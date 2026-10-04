@@ -1,0 +1,37 @@
+resources:
+  volumes:
+    raw:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.hsl_live_transit_schema.name}
+      name: raw
+      comment: Raw landing files (GTFS downloads).
+
+  jobs:
+    hsl_daily:
+      name: hsl_daily_${var.schema}
+      # HSL republishes GTFS around 08:00 Helsinki time.
+      schedule:
+        quartz_cron_expression: "0 0 9 * * ?"
+        timezone_id: Europe/Helsinki
+        pause_status: ${var.daily_job_pause_status}
+      environments:
+        - environment_key: default
+          spec:
+            client: "4"
+      tasks:
+        - task_key: gtfs_load
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/jobs/gtfs_loader.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${resources.schemas.hsl_live_transit_schema.name}
+              - --volume=${resources.volumes.raw.name}
+              - --url=${var.gtfs_url}
+        - task_key: retention
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/jobs/retention.py
+            parameters:
+              - --catalog=${var.catalog}
+              - --schema=${resources.schemas.hsl_live_transit_schema.name}

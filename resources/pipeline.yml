@@ -1,0 +1,23 @@
+resources:
+  pipelines:
+    hsl_live_transit:
+      name: ${var.schema}
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hsl_live_transit_schema.name}
+      serverless: true
+      # MQTT is endless, so the pipeline must run continuously while a demo runs.
+      # It is on demand: stop it after use (NFR-4).
+      continuous: true
+      channel: CURRENT
+      root_path: ../src/pipeline
+      libraries:
+        - glob:
+            include: ../src/pipeline/**
+      environment:
+        dependencies:
+          - ../dist/*.whl
+      configuration:
+        hsl.transport: ${var.transport}
+        hsl.replay_path: ${var.replay_path}
+        hsl.catalog: ${var.catalog}
+        hsl.reference_schema: ${var.reference_schema}

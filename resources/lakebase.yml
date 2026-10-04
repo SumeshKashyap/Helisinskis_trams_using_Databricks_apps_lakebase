@@ -1,0 +1,35 @@
+# Live serving (FR-6, ADR-0003): Lakebase project + synced table from gold_vehicle_current.
+# Declared under targets.dev so the replay target doesn't get its own database.
+targets:
+  dev:
+    resources:
+      postgres_projects:
+        hsl_lakebase:
+          project_id: ${var.lakebase_project}
+          display_name: HSL Live Transit
+          pg_version: 17
+          default_endpoint_settings:
+            # Scales to zero when idle, so nothing runs between demos (NFR-4).
+            autoscaling_limit_min_cu: 0.5
+            autoscaling_limit_max_cu: 2
+            # The default is 24 h; suspend 5 min after the last query instead.
+            # These are defaults for endpoints created later: they did NOT change the existing `primary`
+            # endpoint, which stayed at 24 h. It was fixed once with:
+            #   databricks postgres update-endpoint projects/<project>/branches/production/endpoints/primary \
+            #     spec.suspend_timeout_duration --json '{"spec": {"suspend_timeout_duration": "300s"}}'
+            suspend_timeout_duration: 300s
+
+      postgres_synced_tables:
+        gold_vehicle_current_online:
+          # UC name; also Postgres schema "hsl_live_transit", table "gold_vehicle_current_online".
+          synced_table_id: ${var.catalog}.${var.schema}.gold_vehicle_current_online
+          source_table_full_name: ${var.catalog}.${var.schema}.gold_vehicle_current
+          primary_key_columns: [vehicle_id]
+          # Seconds of latency for the live map (NFR-1). Its pipeline runs continuously: stop it after a demo.
+          scheduling_policy: CONTINUOUS
+          branch: ${resources.postgres_projects.hsl_lakebase.name}/branches/production
+          postgres_database: databricks_postgres
+          create_database_objects_if_missing: true
+          new_pipeline_spec:
+            storage_catalog: ${var.catalog}
+            storage_schema: ${var.schema}

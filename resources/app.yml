@@ -1,0 +1,46 @@
+# Databricks App: live map (FR-7) from Lakebase only (FR-6.2); punctuality (FR-8), stop Lateness
+# (FR-9) and the health strip (FR-10) from the SQL Warehouse; Ask (FR-12) through Genie (ADR-0003).
+# An app's compute runs while the app is started: stop it after a demo (NFR-4).
+# UC SELECT grants for the app's service principal: scripts/grant_app_access.py (NFR-6).
+targets:
+  dev:
+    resources:
+      apps:
+        hsl_live_transit_app:
+          name: hsl-live-transit
+          description: Live map and punctuality of Helsinki trams and metro (HSL HFP).
+          source_code_path: ../src/app
+          config:
+            # init_db.py creates the app-owned Lakebase schemas as the app SP; it never blocks the start.
+            command: ["sh", "-c", "python init_db.py; exec streamlit run app.py --server.port $DATABRICKS_APP_PORT --server.address 0.0.0.0"]
+            env:
+              - name: LAKEBASE_ENDPOINT
+                value: projects/${var.lakebase_project}/branches/production/endpoints/primary
+              - name: LAKEBASE_SCHEMA
+                value: ${var.schema}
+              - name: DATABRICKS_WAREHOUSE_ID
+                value_from: sql_warehouse
+              - name: GENIE_SPACE_ID
+                value_from: genie_space
+              - name: UC_CATALOG
+                value: ${var.catalog}
+              - name: UC_SCHEMA
+                value: ${var.schema}
+          resources:
+            - name: lakebase
+              description: Live vehicle positions (synced from gold_vehicle_current).
+              postgres:
+                branch: projects/${var.lakebase_project}/branches/production
+                database: projects/${var.lakebase_project}/branches/production/databases/databricks-postgres
+                permission: CAN_CONNECT_AND_CREATE
+            - name: sql_warehouse
+              description: Analytics queries and Genie (2X-Small serverless).
+              sql_warehouse:
+                id: ${resources.sql_warehouses.hsl_analytics.id}
+                permission: CAN_USE
+            - name: genie_space
+              description: Ask tab (FR-12).
+              genie_space:
+                name: HSL Live Transit
+                space_id: ${resources.genie_spaces.hsl_ask.id}
+                permission: CAN_RUN
