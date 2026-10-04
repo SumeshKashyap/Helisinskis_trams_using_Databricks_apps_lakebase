@@ -8,7 +8,7 @@ The result is a Databricks App with a live map of every tram and metro, a punctu
 
 [SCREENSHOT: the app's live map with trams coloured by lateness, the health strip and the My Routes strip]
 
-The code is on GitHub: `<repo link>`.
+The code is on GitHub: [SumeshKashyap/Helisinskis_trams_using_Databricks_apps_lakebase](https://github.com/SumeshKashyap/Helisinskis_trams_using_Databricks_apps_lakebase).
 
 ## The architecture in one picture
 
@@ -258,7 +258,7 @@ Vehicle positions and timetables: [Helsinki Region Transport (HSL)](https://www.
 ---
 
 *Review notes (remove before publishing):*
-- *Placeholders: repo link, four screenshots.*
+- *Placeholders: four screenshots.*
 - *Numbers are from 2026-10-03.*
 - *Doc links point to the AWS docs; each page has a cloud selector for Azure and GCP.*
 - *Still open before publishing: the lateness outliers (route 5T averaging about +10 min, route 2 about −18 min) and Jokeri (route 15) departures without stop names. Both show up in the dashboard and Genie answers, so worth checking first.*
