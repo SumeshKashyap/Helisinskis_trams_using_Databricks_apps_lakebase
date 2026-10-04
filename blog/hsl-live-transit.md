@@ -39,7 +39,7 @@ Everything is declared in one Databricks Asset Bundle: pipeline, jobs, Lakebase 
 
 A bundle (Databricks Asset Bundles, now called Declarative Automation Bundles) is a `databricks.yml` file plus YAML files under `resources/` that describe workspace resources as code. `databricks bundle deploy -t dev` creates or updates all of them, `bundle run` starts a job, pipeline or app, and targets (`dev`, `prod`) switch catalogs, schemas and permissions without copying files. Python code is built into a wheel during deploy and attached to the pipeline, which turns out to matter for the custom data source below.
 
-📖 Docs: [What are bundles?](https://docs.databricks.com/aws/en/dev-tools/bundles/) · [Bundle resources](https://docs.databricks.com/aws/en/dev-tools/bundles/resources)
+Docs: [What are bundles?](https://docs.databricks.com/aws/en/dev-tools/bundles/) · [Bundle resources](https://docs.databricks.com/aws/en/dev-tools/bundles/resources)
 
 ## Getting MQTT into Spark without a message bus
 
@@ -63,7 +63,7 @@ spark.readStream.format("hsl_mqtt").option("topics", topics).load()
 
 **What a Python Data Source is.** Since Spark 4.0 (and on current Databricks runtimes and serverless), you can write a data source in pure Python by subclassing `DataSource` and returning a reader. A batch reader yields partitions of rows; a streaming reader also reports offsets, so Structured Streaming knows what it has already read. `simpleStreamReader` is the simplest variant: it runs on the driver and returns each micro-batch directly, which suits a low-volume push feed like MQTT. Once registered with `spark.dataSource.register(...)`, it works with `spark.read` and `spark.readStream`, including inside a Lakeflow pipeline.
 
-📖 Docs: [PySpark custom data sources](https://docs.databricks.com/aws/en/pyspark/datasources)
+Docs: [PySpark custom data sources](https://docs.databricks.com/aws/en/pyspark/datasources)
 
 The trade-off is explicit: MQTT has no replay. If the stream is down, those messages are gone. So instead of pretending there are no gaps, the reader emits a **heartbeat** row every 10 seconds, even when no trams are moving, and every start gets a new session id. Downstream, a gap in heartbeats is a **Data Gap**: missing data, never "no traffic".
 
@@ -107,7 +107,7 @@ The pipeline is a Lakeflow Declarative Pipeline in continuous mode.
 
 *Continuous* mode keeps the pipeline running and processes micro-batches as data arrives; *triggered* mode processes what's there and stops.
 
-📖 Docs: [Lakeflow pipelines](https://docs.databricks.com/aws/en/ldp/) · [Concepts](https://docs.databricks.com/aws/en/ldp/concepts) · [Streaming tables](https://docs.databricks.com/aws/en/ldp/concepts/streaming-tables) · [Materialized views](https://docs.databricks.com/aws/en/ldp/concepts/materialized-views) · [Expectations](https://docs.databricks.com/aws/en/ldp/expectations) · [AUTO CDC](https://docs.databricks.com/aws/en/ldp/cdc) · [Delta change data feed](https://docs.databricks.com/aws/en/tables/features/change-data-feed)
+Docs: [Lakeflow pipelines](https://docs.databricks.com/aws/en/ldp/) · [Concepts](https://docs.databricks.com/aws/en/ldp/concepts) · [Streaming tables](https://docs.databricks.com/aws/en/ldp/concepts/streaming-tables) · [Materialized views](https://docs.databricks.com/aws/en/ldp/concepts/materialized-views) · [Expectations](https://docs.databricks.com/aws/en/ldp/expectations) · [AUTO CDC](https://docs.databricks.com/aws/en/ldp/cdc) · [Delta change data feed](https://docs.databricks.com/aws/en/tables/features/change-data-feed)
 
 The layers:
 
@@ -131,7 +131,7 @@ The live map refreshes every 4 seconds for every open browser. Running that agai
 - **Synced tables.** A managed pipeline that copies a Unity Catalog Delta table into a read-only Postgres table, in *snapshot*, *triggered* or *continuous* mode. Continuous mode reads the source table's change data feed, which is why `gold_vehicle_current` has CDF enabled.
 - **Unity Catalog integration.** A Lakebase database can be registered in Unity Catalog, and authentication uses Databricks identities with short-lived OAuth tokens instead of passwords.
 
-📖 Docs: [Lakebase Postgres](https://docs.databricks.com/aws/en/oltp/projects) · [Synced tables](https://docs.databricks.com/aws/en/oltp/projects/sync-tables) · [Autoscaling](https://docs.databricks.com/aws/en/oltp/projects/autoscaling) · [Scale to zero](https://docs.databricks.com/aws/en/oltp/projects/scale-to-zero) · [Branches](https://docs.databricks.com/aws/en/oltp/projects/branches)
+Docs: [Lakebase Postgres](https://docs.databricks.com/aws/en/oltp/projects) · [Synced tables](https://docs.databricks.com/aws/en/oltp/projects/sync-tables) · [Autoscaling](https://docs.databricks.com/aws/en/oltp/projects/autoscaling) · [Scale to zero](https://docs.databricks.com/aws/en/oltp/projects/scale-to-zero) · [Branches](https://docs.databricks.com/aws/en/oltp/projects/branches)
 
 The synced table is declared in the bundle:
 
@@ -153,7 +153,7 @@ The other tabs read the gold Delta tables through a 2X-Small serverless SQL ware
 
 **SQL warehouses in brief.** A SQL warehouse is compute dedicated to SQL, running the Photon engine. The *serverless* type starts in seconds, scales clusters with concurrency, and stops itself after an idle timeout, which suits an app that's only open during demos. The app talks to it with the `databricks-sql-connector`, authenticated as the app's service principal.
 
-📖 Docs: [SQL warehouses](https://docs.databricks.com/aws/en/compute/sql-warehouse/) · [Serverless SQL warehouses](https://docs.databricks.com/aws/en/admin/sql/serverless)
+Docs: [SQL warehouses](https://docs.databricks.com/aws/en/compute/sql-warehouse/) · [Serverless SQL warehouses](https://docs.databricks.com/aws/en/admin/sql/serverless)
 
 The tabs:
 
@@ -167,7 +167,7 @@ Every query runs in 0.5–2.6 s. The departures chart shades Data Gaps grey, so 
 
 The same data also backs an **AI/BI dashboard** (formerly Lakeview), built with no app code at all: datasets are SQL queries, widgets are drag-and-drop, and the on-time window bounds are dashboard parameters. The dashboard is a `.lvdash.json` file deployed by the bundle.
 
-📖 Docs: [AI/BI dashboards](https://docs.databricks.com/aws/en/dashboards) · [AI/BI overview](https://docs.databricks.com/aws/en/ai-bi/)
+Docs: [AI/BI dashboards](https://docs.databricks.com/aws/en/dashboards) · [AI/BI overview](https://docs.databricks.com/aws/en/ai-bi/)
 
 ## "Is tram 4 on time right now?"
 
@@ -175,7 +175,7 @@ The Ask tab is a **Genie** space over the gold tables, called from the app throu
 
 **Genie in brief.** A Genie space (now called a Genie Agent) is a natural-language interface over a fixed set of Unity Catalog tables. An author adds the tables, plain-text instructions, example SQL queries and trusted functions; Genie turns questions into SQL, runs it on a SQL warehouse as the asking user, and returns the result with the query. The Conversation API exposes the same thing to code: start a conversation, post a message, poll until the answer and its SQL are ready.
 
-📖 Docs: [Genie Agents](https://docs.databricks.com/aws/en/genie-agents/) · [Conversation API](https://docs.databricks.com/aws/en/genie-agents/conversation-api) · [Best practices](https://docs.databricks.com/aws/en/genie-agents/best-practices)
+Docs: [Genie Agents](https://docs.databricks.com/aws/en/genie-agents/) · [Conversation API](https://docs.databricks.com/aws/en/genie-agents/conversation-api) · [Best practices](https://docs.databricks.com/aws/en/genie-agents/best-practices)
 
  The interesting part wasn't wiring it up; it was the instructions. Out of the box, Genie had no way to know that positive lateness means late, that metro lateness is unknown rather than zero, or what "today" means for a service that runs past midnight. Two failures taught me the most:
 
@@ -192,7 +192,7 @@ First, a word on the app itself.
 
 **Databricks Apps in brief.** Databricks Apps host Python (Streamlit, Dash, Gradio, Flask, FastAPI) or Node.js web apps on serverless compute inside the workspace, behind workspace single sign-on. Each app gets its own **service principal**, and you attach **resources** to it (a SQL warehouse, a Genie space, a Lakebase database, secrets…) in `app.yml` or the bundle. The platform grants the service principal access and injects connection details as environment variables, so the code holds no credentials. With *user authorization* enabled, the app can also act on behalf of the signed-in viewer. The runtime pins specific library versions, listed in the system environment page.
 
-📖 Docs: [Databricks Apps](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/) · [Resources](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources) · [Authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth) · [Lakebase in apps](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/lakebase) · [System environment](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/system-env)
+Docs: [Databricks Apps](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/) · [Resources](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources) · [Authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth) · [Lakebase in apps](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/lakebase) · [System environment](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/system-env)
 
 Lakebase isn't only a read cache. Riders can **report a problem** with a tram on the map (late, crowded, skipped a stop, …) and save the **routes they watch**. Both are written to Postgres tables the app owns.
 
@@ -221,7 +221,7 @@ Then the reports go back to the lakehouse with **Lakebase Change Data Feed** (Pu
 
 The rider felt it was late; by the definition we use, it was on time. That's exactly the kind of question you can now ask Genie: "Do Rider Reports match measured lateness?"
 
-📖 Docs: [Lakebase Change Data Feed quickstart](https://docs.databricks.com/aws/en/oltp/projects/quickstart-lakebase-cdf)
+Docs: [Lakebase Change Data Feed quickstart](https://docs.databricks.com/aws/en/oltp/projects/quickstart-lakebase-cdf)
 
 Things that bit me here:
 
@@ -241,7 +241,7 @@ databricks bundle run demo_stop -t dev          # end early
 
 It starts the ingestion pipeline, the Lakebase sync and the app, waits, and stops all three. The stop task uses the job's `run_if: ALL_DONE` condition, so it runs even if something failed. The warehouse and Lakebase compute stop themselves when idle.
 
-📖 Docs: [Lakeflow Jobs](https://docs.databricks.com/aws/en/jobs)
+Docs: [Lakeflow Jobs](https://docs.databricks.com/aws/en/jobs)
 
 ## What I'd tell you before you start
 
