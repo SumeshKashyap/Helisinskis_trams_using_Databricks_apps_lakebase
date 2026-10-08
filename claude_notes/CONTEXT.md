@@ -63,7 +63,7 @@ The time between two consecutive Vehicles of the same Route and direction depart
 _Avoid_: Gap, spacing, interval
 
 **Bunching**:
-Two consecutive Vehicles of the same Route and direction whose Headway is far below the scheduled headway, so they travel almost together and leave a long wait behind them.
+Two consecutive Vehicles of the same Route and direction whose Headway is far below the planned frequency (default: under 25 % of it), so they travel almost together and leave a long wait behind them.
 _Avoid_: Platooning, clustering
 
 ### Live map

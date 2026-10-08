@@ -1,4 +1,4 @@
-"""Set up the Bike, walk or wait agent (FR-15, ADR-0007).
+"""Set up the agent tools: Bike, walk or wait (FR-15) and the Bunching spotter (FR-16), ADR-0007/0008.
 
 1. Unity Catalog HTTP connections `hsl_fmi` (weather) and `hsl_digitransit` (journey planner, city bikes).
 2. The tool functions in src/agents/functions.sql, plus `decide_trip`, built from src/agents/rules.py.
@@ -102,7 +102,7 @@ def function_statements(target):
     return statements
 
 
-def setup_functions(w, run, target):
+def setup_functions(w, run, target, only=None):
     for name, (host, base_path) in CONNECTIONS.items():
         run(f"CREATE CONNECTION IF NOT EXISTS {name} TYPE HTTP OPTIONS "
             f"(host '{host}', port '443', base_path '{base_path}', bearer_token 'unused')")
@@ -117,6 +117,9 @@ def setup_functions(w, run, target):
         print(f"WARNING: stored a placeholder for {SECRET_SCOPE}/{SECRET_KEY}; put the real Digitransit key there.")
 
     for statement in function_statements(target):
+        name = statement.split("(")[0].split(".")[-1].strip("` ")
+        if only and name not in only:
+            continue
         run(statement)
         print(statement.split("(")[0].replace("CREATE OR REPLACE ", "").strip())
 
@@ -200,6 +203,8 @@ def setup_agent(w, target):
         "weather_outlook": fn("weather_outlook", "FMI weather forecast (rain, chance of rain, wind, gusts, "
                               "temperature) for the next two hours at a latitude/longitude."),
         "find_stop": fn("find_stop", "Find HSL Stops by name, with coordinates."),
+        "bunching_now": fn("bunching_now", "Tram Bunching right now: pairs of trams on a Route leaving the "
+                           "same Stop far closer together than planned (FR-16)."),
         "punctuality_history": sa.Tool(
             tool_type="genie_space", genie_space=sa.GenieSpace(id=genie.space_id),
             description="SQL analytics on tram Punctuality, departures, Stop Lateness, Coverage and Rider "
@@ -226,12 +231,15 @@ def main():
     p.add_argument("--schema", default="hsl_live_transit")
     p.add_argument("--check", action="store_true", help="run each function once after creating it")
     p.add_argument("--skip-agent", action="store_true", help="functions only, no Supervisor Agent")
+    p.add_argument("--only", nargs="+", help="create just these functions, e.g. tram_bunching in the replay schema")
     args = p.parse_args()
 
     w = WorkspaceClient(profile=args.profile)
     target = f"`{args.catalog}`.`{args.schema}`"
     run = sql_runner(w, args.catalog, args.schema)
-    setup_functions(w, run, target)
+    setup_functions(w, run, target, args.only)
+    if args.only:
+        return
     if args.check:
         check(run, target)
     if not args.skip_agent:

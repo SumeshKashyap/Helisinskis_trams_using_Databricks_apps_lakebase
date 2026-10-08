@@ -1,4 +1,4 @@
-"""SQL and pure helpers for the analytics views (FR-8, FR-9, FR-10). No Streamlit, no database.
+"""SQL and pure helpers for the analytics views (FR-8, FR-9, FR-10, FR-16). No Streamlit, no database.
 
 Every query takes named parameters (`:since`, `:until`, …) for the Databricks SQL connector.
 Punctuality is computed here, at query time, because the On-time window is the viewer's (FR-4.2).
@@ -198,4 +198,77 @@ def my_routes_summary(vehicles, reports, routes):
                 "reports": n_reports,
             }
         )
+    return out
+
+
+# FR-16 Bunching: Headway and the Bunching flag come from the UC function tram_bunching (ADR-0007), so
+# the app, the agent and SQL users share one definition.
+BUNCHING_SHARE = 0.25  # FR-16.2 default
+
+
+def bunching_sql(prefix):
+    return f"SELECT * FROM {prefix}.tram_bunching(:since, :until, :max_share)"
+
+
+def bunching_now_sql(prefix):
+    return f"SELECT * FROM {prefix}.bunching_now(:route)"
+
+
+def bunching_by_route(pairs):
+    """FR-16.5: per tram Route and direction, how often and by how many trams Bunching happened.
+
+    Each row of `pairs` is one departure compared with the tram that left the same Stop just before it,
+    so one pair of trams running together counts once at every Stop it passes:
+    - departures: departures compared (with a planned frequency; the others can't be judged),
+    - bunched_departures: those below the Bunching threshold, and `share` of them,
+    - tram_pairs: distinct (leader, follower) Vehicle pairs among them,
+    - median_headway_s: median Headway of the bunched departures (None when there are none).
+    """
+    judged = pairs[pairs["scheduled_headway_s"].notna()] if not pairs.empty else pairs
+    if judged.empty:
+        return []
+    out = []
+    for (route, direction), g in judged.groupby(["route", "direction"], sort=False):
+        bunched = g[g["bunching"].astype(bool)]
+        out.append(
+            {
+                "route": route,
+                "direction": direction,
+                "departures": len(g),
+                "bunched_departures": len(bunched),
+                "share": len(bunched) / len(g),
+                "tram_pairs": len(bunched[["leader_vehicle_id", "follower_vehicle_id"]].drop_duplicates()),
+                "median_headway_s": int(bunched["headway_s"].median()) if len(bunched) else None,
+            }
+        )
+    return sorted(out, key=lambda r: (-r["bunched_departures"], route_sort_key(r["route"]), r["direction"]))
+
+
+def bunching_by_stop(pairs):
+    """FR-16.5: Stops where Bunching happened, with how often and on which Routes."""
+    if pairs.empty:
+        return []
+    b = pairs[pairs["bunching"].astype(bool)]
+    out = []
+    for (stop_id, name, lat, long), g in b.groupby(["stop_id", "stop_name", "stop_lat", "stop_long"]):
+        routes = ", ".join(sorted(g["route"].unique(), key=route_sort_key))
+        out.append(
+            {"stop_id": stop_id, "stop_name": name, "lat": lat, "long": long, "bunching": len(g), "routes": routes}
+        )
+    return sorted(out, key=lambda r: -r["bunching"])
+
+
+def pair_lines(now_pairs, vehicles):
+    """FR-16.3: a map line from each bunched leader to its follower, at their current positions.
+
+    Pairs where either Vehicle isn't on the live map are left out.
+    """
+    if now_pairs.empty or vehicles.empty:
+        return []
+    pos = {v: (lo, la) for v, lo, la in zip(vehicles["vehicle_id"], vehicles["long"], vehicles["lat"])}
+    out = []
+    for r in now_pairs.to_dict("records"):
+        a, b = pos.get(r["leader_vehicle_id"]), pos.get(r["follower_vehicle_id"])
+        if a and b:
+            out.append({"route": r["route"], "headway_s": int(r["headway_s"]), "from": list(a), "to": list(b)})
     return out

@@ -1,4 +1,4 @@
--- Unity Catalog functions behind the Bike, walk or wait agent (FR-15, ADR-0007).
+-- Unity Catalog functions behind the agents: Bike, walk or wait (FR-15) and the Bunching spotter (FR-16), ADR-0007.
 -- scripts/setup_agents.py replaces __S__ with `catalog`.`schema` and runs each statement
 -- (separated by lines of dashes). decide_trip is created by the script from src/agents/rules.py.
 -- Outside calls go through UC HTTP connections hsl_fmi and hsl_digitransit; the Digitransit key
@@ -292,3 +292,93 @@ RETURN
       CASE WHEN NOT live THEN 'our HSL feed is not running, so measured Lateness is unknown' END
     ), '')
   FROM decided;
+
+------------------------------------------------------------------------------------------------
+
+-- Bunching spotter (FR-16). Headway and Bunching come from departure Stop Events only (trams;
+-- metro has none, ADR-0004), so no stop sequence or shapes are needed.
+CREATE OR REPLACE FUNCTION __S__.tram_bunching(
+  since TIMESTAMP COMMENT 'Start of the window (the second departure of a pair falls in it)',
+  until TIMESTAMP COMMENT 'End of the window',
+  max_share DOUBLE COMMENT 'A pair is Bunching when Headway < max_share x scheduled headway; default 0.25'
+)
+RETURNS TABLE (
+  route STRING, direction STRING, stop_id STRING, stop_name STRING, stop_lat DOUBLE, stop_long DOUBLE,
+  leader_vehicle_id STRING, follower_vehicle_id STRING, leader_departed_at TIMESTAMP, follower_departed_at TIMESTAMP,
+  headway_s INT, scheduled_headway_s INT, leader_lateness_s INT, follower_lateness_s INT, bunching BOOLEAN
+)
+COMMENT 'Headway between consecutive trams of the same Route and direction departing the same Stop (FR-16.1). scheduled_headway_s is the planned frequency there: the median gap between consecutive scheduled departures in that hour. bunching = Headway below max_share of it (FR-16.2). One row per consecutive pair; the follower is the tram behind, the one to recommend.'
+RETURN
+  WITH d AS (
+    SELECT route, direction, stop_id, stop_name, stop_lat, stop_long, vehicle_id, journey_id,
+           departed_at, scheduled_departure, lateness_s
+    FROM __S__.gold_departures
+    -- One extra hour so the first departure in the window still has the one before it.
+    WHERE departed_at >= tram_bunching.since - INTERVAL 1 HOUR AND departed_at < tram_bunching.until
+  ),
+  -- Planned frequency: median gap between consecutive scheduled departures per Stop and hour. Not the
+  -- gap between the pair's own journeys: a tram hours late would make that gap meaningless. Gaps over
+  -- an hour mean departures we didn't observe (Data Gaps, short demo runs), not the plan: ignored.
+  s AS (
+    SELECT *, percentile_approx(sched_gap, 0.5) OVER (
+      PARTITION BY route, direction, stop_id, date_trunc('HOUR', scheduled_departure)) AS planned_gap
+    FROM (
+      SELECT *, CASE WHEN g > 0 AND g <= 3600 THEN g END AS sched_gap
+      FROM (
+        SELECT *, timestampdiff(SECOND, lag(scheduled_departure) OVER (
+          PARTITION BY route, direction, stop_id ORDER BY scheduled_departure), scheduled_departure) AS g
+        FROM d
+      )
+    )
+  ),
+  p AS (
+    SELECT *,
+      lag(vehicle_id) OVER w AS leader_vehicle_id,
+      lag(journey_id) OVER w AS leader_journey_id,
+      lag(departed_at) OVER w AS leader_departed_at,
+      lag(lateness_s) OVER w AS leader_lateness_s
+    FROM s
+    WINDOW w AS (PARTITION BY route, direction, stop_id ORDER BY departed_at)
+  ),
+  h AS (
+    SELECT *,
+      CAST(timestampdiff(SECOND, leader_departed_at, departed_at) AS INT) AS headway,
+      CAST(planned_gap AS INT) AS scheduled_headway
+    FROM p
+    WHERE leader_vehicle_id IS NOT NULL AND leader_vehicle_id <> vehicle_id AND leader_journey_id <> journey_id
+      AND departed_at >= tram_bunching.since
+  )
+  SELECT
+    route, direction, stop_id, stop_name, stop_lat, stop_long,
+    leader_vehicle_id, vehicle_id, leader_departed_at, departed_at,
+    headway, nullif(scheduled_headway, 0), leader_lateness_s, lateness_s,
+    coalesce(scheduled_headway > 0 AND headway < coalesce(tram_bunching.max_share, 0.25) * scheduled_headway, false)
+  FROM h;
+
+------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION __S__.bunching_now(route_name STRING COMMENT 'Route as riders know it, e.g. "4"; empty or null = all tram Routes')
+RETURNS TABLE (
+  feed_live BOOLEAN, route STRING, direction STRING, stop_name STRING, leader_vehicle_id STRING,
+  follower_vehicle_id STRING, headway_s INT, scheduled_headway_s INT, leader_lateness_s INT,
+  follower_lateness_s INT, follower_departed_at TIMESTAMP, age_s BIGINT
+)
+COMMENT 'Bunching happening now (FR-16.3, FR-16.4): pairs of trams on the same Route and direction that left their latest common Stop within the last 5 minutes with a Headway below 25 % of the planned frequency. The follower is the tram behind. Always at least one row: feed_live = false means our HSL feed is not running, so Bunching is unknown (not "none"); feed_live = true with an empty route means no Bunching now.'
+RETURN
+  WITH feed AS (
+    SELECT coalesce(max(heartbeat_at) >= current_timestamp() - INTERVAL 30 SECONDS, false) AS live
+    FROM __S__.silver_heartbeats
+    WHERE heartbeat_at >= current_timestamp() - INTERVAL 1 HOUR
+  ),
+  pairs AS (
+    SELECT route, direction, stop_name, leader_vehicle_id, follower_vehicle_id, headway_s, scheduled_headway_s,
+           leader_lateness_s, follower_lateness_s, follower_departed_at,
+           timestampdiff(SECOND, follower_departed_at, current_timestamp()) AS age_s
+    FROM __S__.tram_bunching(current_timestamp() - INTERVAL 5 MINUTES, current_timestamp(), 0.25)
+    WHERE bunching AND (nullif(trim(bunching_now.route_name), '') IS NULL OR route = trim(bunching_now.route_name))
+    -- A bunched pair shows up at every Stop it passes; keep its latest one.
+    QUALIFY row_number() OVER (
+      PARTITION BY route, direction, leader_vehicle_id, follower_vehicle_id ORDER BY follower_departed_at DESC) = 1
+  )
+  SELECT feed.live, pairs.* FROM feed LEFT JOIN pairs ON true
+  ORDER BY pairs.headway_s;

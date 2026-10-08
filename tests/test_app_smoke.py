@@ -167,6 +167,10 @@ class FakeWarehouse:
             return pd.DataFrame({"stop_name": ["Rautatientori", "Kaivopuisto"]})
         if "bike_walk_or_wait(" in statement:
             return pd.DataFrame([ADVICE])
+        if "tram_bunching(" in statement:
+            return pd.DataFrame(BUNCHING_PAIRS)
+        if "bunching_now(" in statement:
+            return pd.DataFrame([BUNCHING_PAIRS[0]])
         raise AssertionError(f"unexpected query: {statement}")
 
 
@@ -180,6 +184,16 @@ ADVICE = {
     "rain_probability_pct": 4.0, "gust_ms": 12.9, "temperature_c": 12.4, "in_bike_season": True,
     "problems": "our HSL feed is not running, so measured Lateness is unknown",
 }  # fmt: skip
+
+
+BUNCHING_PAIRS = [
+    {"route": "3", "direction": "2", "stop_id": "1", "stop_name": "Kaivopuisto", "stop_lat": 60.16,
+     "stop_long": 24.95, "leader_vehicle_id": "40/75", "follower_vehicle_id": "40/81", "headway_s": 70,
+     "scheduled_headway_s": 600, "leader_lateness_s": 300, "follower_lateness_s": -20, "bunching": True},
+    {"route": "3", "direction": "2", "stop_id": "2", "stop_name": "Eira", "stop_lat": 60.157,
+     "stop_long": 24.94, "leader_vehicle_id": "40/81", "follower_vehicle_id": "40/90", "headway_s": 580,
+     "scheduled_headway_s": 600, "leader_lateness_s": -20, "follower_lateness_s": 10, "bunching": False},
+]  # fmt: skip
 
 
 def fake_invoke(messages, tools):
@@ -236,7 +250,9 @@ def test_app_renders_without_exceptions(run_app):
     assert metrics["Fresh (≤ 30 s)"] == "2"
     assert metrics["Punctuality, all tram routes"] == "83%"  # (5 + 15 + 30) / 60
     assert metrics["Departures"] == "60"
-    assert [t.label for t in at.tabs] == ["Live map", "Punctuality", "Stop Lateness", "Ask", "Bike, walk or wait"]
+    assert [t.label for t in at.tabs] == [
+        "Live map", "Punctuality", "Stop Lateness", "Bunching", "Ask", "Bike, walk or wait"
+    ]  # fmt: skip
 
 
 def test_low_coverage_warns(run_app):
@@ -356,3 +372,28 @@ def test_agent_chat_answers_and_survives_endpoint_errors(run_app):
     at.chat_input(key="agent_input").set_value("boom").run()
     assert not at.exception
     assert any("The agent couldn't answer" in e.value for e in at.error)
+
+
+def test_bunching_tab_live_and_history(run_app):
+    at, wh = run_app()
+    assert not at.error, [e.value for e in at.error]
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["Departures compared"] == "2" and metrics["Bunched departures"] == "1"
+    assert metrics["Share bunched"] == "50.0%" and metrics["Tram pairs bunched"] == "1"
+    assert any("bunching_now(" in q for q, _ in wh.queries)  # feed live: the "now" list is queried
+    decks = [d.proto.json for d in at.get("deck_gl_json_chart")]
+    assert any("LineLayer" in d for d in decks)  # leader 40/75 and follower 40/81 are both on the map
+
+
+def test_bunching_now_waits_for_the_feed(run_app):
+    at, wh = run_app(FakeWarehouse(live=False))
+    assert any("no live Bunching" in i.value for i in at.info)
+    assert not any("bunching_now(" in q for q, _ in wh.queries)
+
+
+def test_bunching_share_slider_requeries(run_app):
+    at, wh = run_app()
+    at.slider(key="bunch_share").set_value(40).run()
+    assert not at.exception
+    sent = [p for q, p in wh.queries if "tram_bunching(" in q]
+    assert sent[-1]["max_share"] == 0.4

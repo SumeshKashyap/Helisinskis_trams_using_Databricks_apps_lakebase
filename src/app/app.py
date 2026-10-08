@@ -1,6 +1,6 @@
 """HSL Live Transit: live map (FR-7), punctuality board (FR-8), stop lateness (FR-9),
-health strip (FR-10), Ask (FR-12), Rider Reports (FR-13), My Routes (FR-14) and the Bike, walk or
-wait agent (FR-15) for Helsinki trams and metro.
+health strip (FR-10), Ask (FR-12), Rider Reports (FR-13), My Routes (FR-14), the Bike, walk or
+wait agent (FR-15) and the Bunching spotter (FR-16) for Helsinki trams and metro.
 
 The live map reads Lakebase; analytics read Delta through the SQL Warehouse (ADR-0003). Rider
 Reports and My Routes are written to app-owned Lakebase tables (ADR-0006).
@@ -154,7 +154,7 @@ def health_strip():
         return
     now = h["now"]
     live = is_live(h)
-    state = "🟢 **Live**" if live else "🔴 **Stopped**"
+    state = "🟢 <b>Live</b>" if live else "🔴 <b>Stopped</b>"  # inside HTML: no markdown
     if not live and h.get("last_heartbeat_at") is not None and not pd.isna(h["last_heartbeat_at"]):
         state += f" since {local_hms(h['last_heartbeat_at'])}"
     eps = h.get("events_per_s")
@@ -714,6 +714,143 @@ def stops_tab():
     band_legend("Colour = average departure Lateness at the stop; size = number of departures.")
 
 
+# ---------------------------------------------------------------- FR-16 Bunching
+
+
+@st.cache_data(ttl=ANALYTICS_TTL_S, show_spinner=False)
+def load_bunching(window, now, max_share):
+    since, until, _ = an.window_bounds(window, now)
+    wh = warehouse()
+    return wh.query(an.bunching_sql(wh.prefix), {"since": since, "until": until, "max_share": max_share})
+
+
+def load_bunching_now(route):
+    wh = warehouse()
+    return wh.query(an.bunching_now_sql(wh.prefix), {"route": route or ""})
+
+
+def bunching_now_section(route):
+    """FR-16.3: pairs bunched in the last 5 minutes, listed and drawn between their current positions."""
+    st.markdown("**Bunching now** (last 5 minutes, Headway below 25 % of the planned frequency)")
+    h, _ = health_state()
+    if h is None or not is_live(h):
+        st.info("Our HSL feed isn't running, so there is no live Bunching to show. History is below.")
+        return
+    try:
+        now_pairs = load_bunching_now(route)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not query the SQL Warehouse: {e}")
+        return
+    now_pairs = now_pairs[now_pairs["leader_vehicle_id"].notna()]  # the feed-status row has no pair
+    if now_pairs.empty:
+        st.success("No Bunching right now" + (f" on Route {route}." if route else "."))
+        return
+    shown = now_pairs.rename(columns={
+        "route": "Route", "direction": "Direction", "stop_name": "Last Stop", "leader_vehicle_id": "Ahead", "follower_vehicle_id": "Behind",
+        "headway_s": "Headway (s)", "scheduled_headway_s": "Planned (s)",
+        "leader_lateness_s": "Lateness ahead (s)", "follower_lateness_s": "Lateness behind (s)",
+    })  # fmt: skip
+    st.dataframe(
+        shown[["Route", "Direction", "Last Stop", "Ahead", "Behind", "Headway (s)", "Planned (s)",
+               "Lateness ahead (s)", "Lateness behind (s)"]],
+        hide_index=True, use_container_width=True,
+    )  # fmt: skip
+    try:
+        lines = an.pair_lines(now_pairs, load_vehicles())
+    except Exception:  # noqa: BLE001 - the list above still answers; the map is extra
+        lines = []
+    if lines:
+        layer = pdk.Layer(
+            "LineLayer", data=lines, get_source_position="from", get_target_position="to",
+            get_color=[200, 30, 120, 230], get_width=6, pickable=True,
+        )  # fmt: skip
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[layer], initial_view_state=MAP_VIEW, map_style=pdk.map_styles.CARTO_LIGHT,
+                tooltip={"html": "Route {route}: trams {headway_s} s apart"},
+            ),
+            use_container_width=True,
+        )  # fmt: skip
+    st.caption("The tram behind is usually emptier, but HSL doesn't publish occupancy for trams, so we can't show it.")
+
+
+def bunching_tab():
+    st.subheader("Bunching (trams)")
+    st.caption(
+        "Two trams of the same Route and direction running almost together, leaving a long wait behind "
+        "them. Headway = time between their departures from the same Stop; Bunching = Headway below a "
+        "share of the planned frequency there. Metro has no Stop Events, so it isn't covered."
+    )
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        window = window_picker("bunch")
+    with c2:
+        try:
+            routes = load_tram_routes()
+        except Exception:  # noqa: BLE001
+            routes = []
+        route = st.selectbox("Route", ["All routes", *routes], key="bunch_route")
+    with c3:
+        share = st.slider("Bunching below (% of planned)", 10, 50, int(an.BUNCHING_SHARE * 100), 5, key="bunch_share")
+    route = None if route == "All routes" else route
+
+    bunching_now_section(route)
+
+    st.divider()
+    st.markdown("**History**")
+    now = now_minute()
+    try:
+        coverage_note(window, now)
+        pairs = load_bunching(window, now, share / 100)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not query the SQL Warehouse: {e}")
+        return
+    if route and not pairs.empty:
+        pairs = pairs[pairs["route"] == route]
+    summary = pd.DataFrame(an.bunching_by_route(pairs))
+    if summary.empty:
+        st.info("No consecutive tram departures with a known planned frequency in this window.")
+        return
+    total, bunched = int(summary["departures"].sum()), int(summary["bunched_departures"].sum())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Departures compared", f"{total:,}",
+              help="Each tram departure from a Stop, compared with the tram of the same Route and direction "
+              "that left that Stop just before it.")
+    m2.metric("Bunched departures", f"{bunched:,}")
+    m3.metric("Share bunched", f"{bunched / total:.1%}")
+    m4.metric("Tram pairs bunched", f"{int(summary['tram_pairs'].sum()):,}",
+              help="Distinct pairs of trams. One pair running together counts once here, but once per Stop "
+              "under Bunched departures.")
+    summary["share"] = (summary["share"] * 100).round(1)
+    summary["median_headway_s"] = summary["median_headway_s"].map(lambda v: "–" if pd.isna(v) else f"{int(v)} s")
+    st.dataframe(
+        summary.rename(columns={
+            "route": "Route", "direction": "Direction", "departures": "Departures compared",
+            "bunched_departures": "Bunched departures", "share": "Share %", "tram_pairs": "Tram pairs bunched",
+            "median_headway_s": "Median Headway when bunched",
+        })[["Route", "Direction", "Departures compared", "Bunched departures", "Share %", "Tram pairs bunched",
+            "Median Headway when bunched"]],
+        hide_index=True, use_container_width=True,
+    )  # fmt: skip
+    st.caption("A pair of trams running together is counted at every Stop it passes: e.g. 1 tram pair "
+               "bunched over 3 Stops = 3 bunched departures.")
+    stops = pd.DataFrame(an.bunching_by_stop(pairs))
+    if not stops.empty:
+        stops["radius"] = stops["bunching"].map(lambda n: 30 + 25 * math.sqrt(n))
+        layer = pdk.Layer(
+            "ScatterplotLayer", data=stops, get_position=["long", "lat"], get_fill_color=[200, 30, 120, 180],
+            get_radius="radius", radius_min_pixels=3, radius_max_pixels=20, pickable=True,
+        )  # fmt: skip
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[layer], initial_view_state=MAP_VIEW, map_style=pdk.map_styles.CARTO_LIGHT,
+                tooltip={"html": "<b>{stop_name}</b><br/>Routes {routes}<br/>{bunching} bunched departures"},
+            ),
+            use_container_width=True,
+        )  # fmt: skip
+        st.caption("Stops where trams left bunched; size = how often.")
+
+
 # ---------------------------------------------------------------- FR-12 Ask (Genie)
 
 EXAMPLES = [
@@ -949,8 +1086,8 @@ with st.sidebar:
         "Weather: Finnish Meteorological Institute, CC BY 4.0."
     )
 
-tab_map, tab_punct, tab_stops, tab_ask, tab_advice = st.tabs(
-    ["Live map", "Punctuality", "Stop Lateness", "Ask", "Bike, walk or wait"]
+tab_map, tab_punct, tab_stops, tab_bunch, tab_ask, tab_advice = st.tabs(
+    ["Live map", "Punctuality", "Stop Lateness", "Bunching", "Ask", "Bike, walk or wait"]
 )
 with tab_map:
     live_map(modes, routes, tuple(watched), only_mine)
@@ -959,6 +1096,8 @@ with tab_punct:
     punctuality_tab()
 with tab_stops:
     stops_tab()
+with tab_bunch:
+    bunching_tab()
 with tab_ask:
     ask_tab()
 with tab_advice:

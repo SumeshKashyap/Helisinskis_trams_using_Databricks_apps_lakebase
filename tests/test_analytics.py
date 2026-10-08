@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src" / "app"))
@@ -108,3 +109,49 @@ def test_answer_from_message_without_content_is_an_error():
 
     msg = types.SimpleNamespace(conversation_id="c1", status="FAILED", error=None, attachments=None)
     assert "FAILED" in genie.answer_from_message(msg, lambda _: None).error
+
+
+def _pairs(rows):
+    cols = ["route", "direction", "stop_id", "stop_name", "stop_lat", "stop_long",
+            "leader_vehicle_id", "follower_vehicle_id", "headway_s", "scheduled_headway_s", "bunching"]  # fmt: skip
+    return pd.DataFrame(rows, columns=cols)
+
+
+def test_bunching_by_route_counts_only_judged_pairs():
+    pairs = _pairs([
+        ("4", "1", "a", "A", 60.1, 24.9, "v1", "v2", 60, 720, True),
+        ("4", "1", "b", "B", 60.2, 24.9, "v1", "v2", 90, 720, True),
+        ("4", "1", "c", "C", 60.3, 24.9, "v2", "v3", 700, 720, False),
+        ("4", "1", "d", "D", 60.3, 24.9, "v3", "v4", 50, None, False),  # no planned frequency: not judged
+        ("10", "2", "a", "A", 60.1, 24.9, "v8", "v9", 500, 600, False),
+    ])  # fmt: skip
+    rows = an.bunching_by_route(pairs)
+    # v1 and v2 bunched at two Stops: 2 bunched departures, 1 tram pair.
+    assert rows[0] == {"route": "4", "direction": "1", "departures": 3, "bunched_departures": 2, "share": 2 / 3,
+                       "tram_pairs": 1, "median_headway_s": 75}  # fmt: skip
+    assert rows[1]["route"] == "10" and rows[1]["bunched_departures"] == 0 and rows[1]["tram_pairs"] == 0
+    assert rows[1]["median_headway_s"] is None
+    assert an.bunching_by_route(pairs.iloc[0:0]) == []
+
+
+def test_bunching_by_stop():
+    pairs = _pairs([
+        ("4", "1", "a", "A", 60.1, 24.9, "v1", "v2", 60, 720, True),
+        ("7", "2", "a", "A", 60.1, 24.9, "v5", "v6", 60, 600, True),
+        ("4", "1", "b", "B", 60.2, 24.9, "v1", "v2", 600, 720, False),
+    ])  # fmt: skip
+    assert an.bunching_by_stop(pairs) == [
+        {"stop_id": "a", "stop_name": "A", "lat": 60.1, "long": 24.9, "bunching": 2, "routes": "4, 7"}
+    ]
+
+
+def test_pair_lines_need_both_vehicles_on_the_map():
+    now_pairs = pd.DataFrame([
+        {"route": "4", "leader_vehicle_id": "v1", "follower_vehicle_id": "v2", "headway_s": 60},
+        {"route": "7", "leader_vehicle_id": "v5", "follower_vehicle_id": "gone", "headway_s": 80},
+    ])  # fmt: skip
+    vehicles = pd.DataFrame({"vehicle_id": ["v1", "v2", "v5"], "long": [24.9, 24.91, 24.8], "lat": [60.1, 60.11, 60.2]})
+    assert an.pair_lines(now_pairs, vehicles) == [
+        {"route": "4", "headway_s": 60, "from": [24.9, 60.1], "to": [24.91, 60.11]}
+    ]
+    assert an.pair_lines(now_pairs.iloc[0:0], vehicles) == []

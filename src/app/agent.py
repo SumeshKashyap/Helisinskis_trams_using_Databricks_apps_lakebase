@@ -1,4 +1,4 @@
-"""Bike, walk or wait agent (FR-15): a tool-calling loop on a Foundation Model API endpoint (ADR-0008).
+"""Bike, walk or wait agent (FR-15) and Bunching spotter (FR-16): a tool-calling loop on a Foundation Model API endpoint (ADR-0008).
 
 The tools are the Unity Catalog functions from src/agents/functions.sql, run on the analytics SQL
 Warehouse as the app's service principal, plus the FR-12 Genie space for history questions. The
@@ -31,6 +31,14 @@ Should I wait, walk or bike?
 - measured_lateness_s is our own measurement of that tram. If it is null, say our measured Lateness is
   unknown right now. Never say a tram is on time when Lateness is unknown.
 - If problems is not empty, say what was missing.
+- If the advice is to wait, call bunching_now with the tram's Route. If that Route has Bunching, add one
+  line: on Route N two trams left <Stop> only H s apart, so another tram may come right after this one.
+
+Bunching (two trams of a Route running almost together, leaving a long gap behind):
+- "Are trams bunching?" or "Is another tram right behind?": bunching_now (Route or empty for all). The
+  follower is the tram behind. If feed_live is false, our feed is not running: say Bunching is unknown
+  right now, never "no Bunching". A row with feed_live true and no route means no Bunching now. Never
+  claim the tram behind is emptier: HSL publishes no tram occupancy.
 - If a Stop is not found or the rider names a place that is not a Stop, call find_stop and ask the
   rider to pick one.
 
@@ -80,6 +88,12 @@ TOOLS = [
         lat=("number", "Latitude"),
         lon=("number", "Longitude"),
     ),
+    _tool(
+        "bunching_now",
+        "Tram Bunching right now (last 5 minutes): pairs of trams on a Route leaving the same Stop with a "
+        "Headway far below the planned frequency. The follower is the tram behind.",
+        route=("string", 'Route as riders know it, e.g. "4"; empty string for all tram Routes'),
+    ),
     _tool("find_stop", "Find HSL Stops by name, with coordinates.", name=("string", "Stop name or its start")),
     _tool(
         "punctuality_history",
@@ -94,6 +108,7 @@ SQL = {
     "tram_lateness": "SELECT * FROM {p}.tram_lateness(:route)",
     "weather_outlook": "SELECT * FROM {p}.weather_outlook(CAST(:lat AS DOUBLE), CAST(:lon AS DOUBLE))",
     "find_stop": "SELECT * FROM {p}.find_stop(:name)",
+    "bunching_now": "SELECT * FROM {p}.bunching_now(:route)",
 }
 
 

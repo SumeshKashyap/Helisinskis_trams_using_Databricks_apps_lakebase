@@ -181,12 +181,12 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 - FR-15.8 No prediction: advice uses current Lateness only (non-goal "Delay prediction").
 
 ### FR-16 Agent — Bunching spotter
-- FR-16.1 For each tram Route and direction, compute the **Headway** between consecutive Vehicles from departure Stop Events (`gold_departures`): at the most recent Stop both Vehicles departed, the time between their departures.
-- FR-16.2 A Vehicle pair is **Bunching** when their Headway is below a configurable share of the scheduled headway (default 25 %, scheduled headway derived from the same Route's departures over the last hour, or Q3's source). The Vehicle behind is the one to recommend.
-- FR-16.3 Live view: a "Bunching now" list (Route, direction, Stop, the two Vehicles, Headway, Lateness of each) and a map layer linking the pair. Data older than the Freshness *fading* band is not shown as live.
-- FR-16.4 Rider advice: when a viewer's Route (My Routes or the FR-15 Stop) has Bunching, the agent says "the next tram has another one about N s behind it". It does not claim the second one is emptier unless HSL publishes occupancy for it (`occu`).
-- FR-16.5 History: Bunching events per Route and Stop over a window, shown with Coverage, so the punctuality board can show where trams bunch. Trams only: metro has no Stop Events (ADR-0004).
-- FR-16.6 The rules (Headway, Bunching threshold) are pure functions with unit tests on the recorded fixtures (NFR-7).
+- FR-16.1 For each tram Route and direction, compute the **Headway** between consecutive Vehicles from departure Stop Events (`gold_departures`): at each Stop, the time between two consecutive departures by different Vehicles and journeys. UC table function `tram_bunching(since, until, max_share)` (ADR-0007), shared by the app and the agent.
+- FR-16.2 A pair is **Bunching** when its Headway is below `max_share` (default 25 %) of the planned frequency there: the median gap between consecutive scheduled departures at that Stop in that hour. Gaps over an hour are ignored (they come from departures we didn't observe), so a pair without a planned frequency is not judged. The pair's own timetable gap is not used: one tram hours late would make it meaningless. The Vehicle behind (the follower) is the one to recommend.
+- FR-16.3 "Bunching now" in the app's Bunching tab: pairs whose follower left their latest common Stop within the last 5 minutes (one row per pair), listed with both Lateness values, and drawn on a map as a line between the two Vehicles' current positions (from Lakebase). Without a live Ingestion Session it says live Bunching is unknown.
+- FR-16.4 Rider advice through the FR-15 agent: tool `bunching_now(route)`. It always returns a `feed_live` row, so "no data" can't be read as "no Bunching". After a "wait" advice the agent checks the tram's Route and mentions a tram close behind. It never claims the tram behind is emptier: HSL publishes no tram occupancy (`occu`). Not shown in the My Routes strip: that refreshes every 4 s from Lakebase, and Bunching comes from the warehouse.
+- FR-16.5 History: for the chosen window (last hour or Operating Day) and Route, pairs, Bunching pairs and their share per Route and direction, and a map of the Stops where trams bunched, always with the window's Coverage. The threshold is a slider (10–50 %, default 25 %). Trams only: metro has no Stop Events (ADR-0004).
+- FR-16.6 Tests: the summary helpers are pure functions with unit tests. The SQL rule is checked on the replay schema (recorded fixtures: 10 pairs, none bunched, one pair checked by hand) and on live history (`setup_agents.py --only tram_bunching --schema …`).
 
 ---
 
@@ -252,7 +252,7 @@ hsl_live_transit/
 | **3. Lakebase + live map** | Synced table and Streamlit map | Map meets NFR-1 and NFR-2; fading visible after stopping the pipeline. |
 | **4. Analytics views** | Punctuality board, heatmap, health strip, Genie chat tab (FR-12) | Slider changes results; coverage warnings appear after an induced gap; the chat answers "is tram N on time?" with the right lateness sign and says "not published" for metro. |
 | **5. Package + publish** | Demo jobs, AI/BI dashboard (FR-11), Rider Reports and My Routes (FR-13, FR-14), README, blog draft | `databricks bundle run demo_session` starts a working app and stops everything after 20 min; a Rider Report written in the app shows on the map and appears in `lb_rider_reports_history`; My Routes survive an app restart; the README lists the steps for another workspace. |
-| **6. Agents** | Bike, walk or wait (FR-15) first (your choice, 2026-10-08), then Bunching spotter (FR-16) | Bunching rules pass unit tests on the fixtures and a live demo lists at least one bunched pair with Headway; the FR-15 agent gives a sensible answer in a live demo for a late tram in dry and in rainy/windy weather (forced through config), drops the bike outside the season, and degrades readably when an outside API is down. Q3–Q5 closed. |
+| **6. Agents** ✅ built 2026-10-08 | Bike, walk or wait (FR-15) first (your choice), then Bunching spotter (FR-16) | Bunching rules pass unit tests on the fixtures and a live demo lists at least one bunched pair with Headway; the FR-15 agent gives a sensible answer in a live demo for a late tram in dry and in rainy/windy weather (forced through config), drops the bike outside the season, and degrades readably when an outside API is down. Q3–Q5 closed. |
 
 ---
 

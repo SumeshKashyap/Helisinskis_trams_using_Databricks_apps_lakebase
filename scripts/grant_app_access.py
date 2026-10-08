@@ -34,7 +34,7 @@ WAREHOUSE_NAME = "hsl-live-transit-analytics"
 # Created by scripts/setup_agents.py. Nested functions need EXECUTE too.
 AGENT_FUNCTIONS = [
     "find_stop", "weather_outlook", "tram_lateness", "parse_trip_options", "trip_options",
-    "decide_trip", "bike_walk_or_wait",
+    "decide_trip", "bike_walk_or_wait", "tram_bunching", "bunching_now",
 ]
 AGENT_CONNECTIONS = ["hsl_fmi", "hsl_digitransit"]
 SECRET_SCOPE = "hsl_live_transit"
