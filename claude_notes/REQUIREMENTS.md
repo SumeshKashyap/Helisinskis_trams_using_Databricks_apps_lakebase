@@ -17,6 +17,7 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 4. Be honest about missing data: every aggregate shows its **Coverage**; **Data Gaps** are visible.
 5. Be reproducible by a blog reader with one `databricks bundle deploy`.
 6. Show Lakebase as an app's transactional store too: viewers write Rider Reports and My Routes, and reports flow back into the lakehouse (ADR-0006).
+7. Show agents that act on the live data: a tool-using agent that combines our Lateness with outside data (city bikes, weather) to advise a rider (FR-15), and one that finds **Bunching** in our own Stop Events (FR-16).
 
 ### Non-goals (v1)
 - Buses, trains, ferries (the MQTT topic filter makes these a config change later, not a redesign).
@@ -24,7 +25,7 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 - Delay prediction / ML models.
 - Metro lateness or punctuality: HSL publishes neither (ADR-0004).
 - Computing position lateness ourselves from the timetable (we trust HSL's `dl`, see ADR-0002; stop-event lateness is open question Q2).
-- Journey planning. Rider-facing features are limited to FR-13 (Rider Reports) and FR-14 (My Routes), which demo Lakebase as a write store (ADR-0006); the FR-12 chat tab is a "question the lakehouse" demo, not a rider service.
+- Journey planning. Rider-facing features are limited to FR-13 (Rider Reports), FR-14 (My Routes), which demo Lakebase as a write store (ADR-0006), and the FR-15/FR-16 advice, which compares a few options for one trip rather than planning routes; the FR-12 chat tab is a "question the lakehouse" demo, not a rider service.
 - Moderation workflows for Rider Reports beyond rate limits and length limits.
 
 ---
@@ -42,6 +43,7 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 | App writes | Lakebase tables owned by the app (Rider Reports, My Routes); reports go back to UC via Lakebase Change Data Feed — ADR-0006 |
 | Analytics serving | Serverless SQL Warehouse |
 | Chat | Genie space over gold and silver tables (FR-12) |
+| Agents | Tools as Unity Catalog functions (outside APIs through UC HTTP connections), ADR-0007; a tool-calling loop in the app on a Foundation Model API endpoint (`databricks-gpt-oss-120b`), ADR-0008 |
 | App | Databricks App — Streamlit + pydeck |
 | Packaging | Databricks Asset Bundle (`databricks.yml`) |
 | Display timezone | Europe/Helsinki; "today" = current **Operating Day** |
@@ -61,6 +63,16 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 ### 3.2 HSL static GTFS — daily batch
 - `hsl.zip` from HSL's GTFS publication (URL to confirm in Phase 0; https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip at the time of writing).
 - Used for: stop names and coordinates (`stops.txt`), route names and modes (`routes.txt`).
+
+### 3.3 HSL Digitransit Routing API — on request (FR-15)
+- GraphQL, `https://api.digitransit.fi/routing/v2/hsl/gtfs/v1`; needs a free subscription key (header `digitransit-subscription-key`).
+- Used for (one `planConnection` request with three aliases): the earliest tram trip with HSL's real-time departure (Q3), walking, and city bike rental with the pick-up station's bikes and the drop-off station's free docks.
+- City bikes run from April to October only (R10).
+- Docs: https://digitransit.fi/en/developers/apis/1-routing-api/
+
+### 3.4 Finnish Meteorological Institute (FMI) open data — on request (FR-15)
+- WFS, `https://opendata.fmi.fi/wfs`, no key. Stored query `fmi::forecast::edited::weather::scandinavia::point::simple`, hourly, parameters `Precipitation1h`, `PoP` (chance of precipitation), `WindSpeedMS`, `HourlyMaximumGust`, `Temperature` (Q4). `WindGust` is always NaN in this forecast.
+- Licence CC BY 4.0: attribute FMI in the app and blog.
 
 ---
 
@@ -153,6 +165,29 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 - FR-14.3 A live-map toggle "Only my Routes" filters the map to the watched Routes.
 - FR-14.4 `hsl_users` is never synced to the lakehouse: it holds emails and has no analytical use.
 
+### FR-15 Agent — Bike, walk or wait
+- FR-15.1 A viewer gives a tram Stop they are at and a destination Stop. The answer is one of **wait**, **walk** or **bike**, the reason, and the numbers behind it. In the app's "Bike, walk or wait" tab: a form that calls `bike_walk_or_wait` directly, and an agent chat that uses the same tools (ADR-0008).
+- FR-15.2 Tools (each one a separate, testable function the agent calls):
+  - `find_stop`: Stops by name from `silver_stops`.
+  - `trip_options`: arrival times for the earliest tram trip (with HSL's real-time departure), walking and city bike, from the Digitransit planner (§3.3, Q3).
+  - `tram_lateness`: our measured Lateness per Vehicle on a Route, with Freshness.
+  - `weather_outlook`: precipitation, chance of rain, wind, gusts and temperature for this and the next two hours (§3.4).
+  - `bike_walk_or_wait`: runs all of the above for two Stops and applies `decide_trip`; it also matches the planner's tram to our journey (`journey_id`) to show our measured Lateness.
+- FR-15.3 A deterministic rule function, not the language model, picks wait, walk or bike from the tool results. The model calls the tools and writes the answer. Thresholds (e.g. rain ≥ 0.5 mm/h or gusts ≥ 10 m/s within the ride time rule out the bike; walking wins when it arrives no later than the tram) are configuration and unit-tested (NFR-7).
+- FR-15.4 The answer always shows the measured Lateness and its Freshness. With no live Ingestion Session, or for metro (ADR-0004), it says Lateness is unknown and bases advice on the timetable only. It never treats unknown as on time.
+- FR-15.5 Outside the city bike season, or when no station within 400 m has a bike, the bike option is dropped with that reason.
+- FR-15.6 If an outside API fails or times out (5 s per call), the agent answers with what it has and names the missing input. The rest of the app keeps working.
+- FR-15.7 Advice is never stored with the viewer's position. Only counts by outcome (wait/walk/bike, reason) are logged for the blog.
+- FR-15.8 No prediction: advice uses current Lateness only (non-goal "Delay prediction").
+
+### FR-16 Agent — Bunching spotter
+- FR-16.1 For each tram Route and direction, compute the **Headway** between consecutive Vehicles from departure Stop Events (`gold_departures`): at the most recent Stop both Vehicles departed, the time between their departures.
+- FR-16.2 A Vehicle pair is **Bunching** when their Headway is below a configurable share of the scheduled headway (default 25 %, scheduled headway derived from the same Route's departures over the last hour, or Q3's source). The Vehicle behind is the one to recommend.
+- FR-16.3 Live view: a "Bunching now" list (Route, direction, Stop, the two Vehicles, Headway, Lateness of each) and a map layer linking the pair. Data older than the Freshness *fading* band is not shown as live.
+- FR-16.4 Rider advice: when a viewer's Route (My Routes or the FR-15 Stop) has Bunching, the agent says "the next tram has another one about N s behind it". It does not claim the second one is emptier unless HSL publishes occupancy for it (`occu`).
+- FR-16.5 History: Bunching events per Route and Stop over a window, shown with Coverage, so the punctuality board can show where trams bunch. Trams only: metro has no Stop Events (ADR-0004).
+- FR-16.6 The rules (Headway, Bunching threshold) are pure functions with unit tests on the recorded fixtures (NFR-7).
+
 ---
 
 ## 5. Non-functional requirements
@@ -164,7 +199,7 @@ A Databricks App showing Helsinki trams and metro in near real time — a live m
 | NFR-3 | Punctuality and heatmap queries ≤ 5 s on a serverless warehouse (size 2X-Small). |
 | NFR-4 | Cost: nothing runs continuously by default. A `demo_session` job starts the ingestion pipeline, the Lakebase sync and the app, and stops all three after a configurable maximum (default 20 min); `demo_stop` ends a demo early. The warehouse and Lakebase compute stop themselves when idle. |
 | NFR-5 | Reproducibility: all resources (pipeline, jobs, Lakebase instance and synced table, app, AI/BI dashboard, Genie space, schemas) are declared in the bundle. One `dev` target (plus `replay`); no `prod` target: readers adapt host, catalog, schema and names in the repo (decided 2026-10-03). |
-| NFR-6 | Security: the app uses its service principal with least-privilege UC grants (SELECT on gold, silver_stops, silver_routes and silver_heartbeats only, the last for the FR-10.1 health strip; CAN RUN on the FR-12 Genie space). In Lakebase it reads the synced schema and owns only the schemas it creates (`hsl_reports`, `hsl_users`, FR-13, FR-14). No secrets are needed for HSL (public feed). |
+| NFR-6 | Security: the app uses its service principal with least-privilege UC grants (SELECT on gold, silver_stops, silver_routes and silver_heartbeats only, the last for the FR-10.1 health strip; CAN RUN on the FR-12 Genie space; for FR-15: EXECUTE on the agent functions, USE CONNECTION on `hsl_fmi`/`hsl_digitransit`, READ on secret scope `hsl_live_transit`, CAN QUERY on the agent's model endpoint). In Lakebase it reads the synced schema and owns only the schemas it creates (`hsl_reports`, `hsl_users`, FR-13, FR-14). No secrets are needed for the HSL feed (public). The Digitransit key (FR-15) lives in secret scope `hsl_live_transit` and is read only inside the `trip_options` UC function (`secret()`, ADR-0007); it never reaches the app or the repo. FMI needs no key. |
 | NFR-7 | Testability: parsing and lateness logic are pure functions with unit tests. The MQTT reader has a test mode that replays recorded payloads from a file. |
 
 ---
@@ -217,6 +252,7 @@ hsl_live_transit/
 | **3. Lakebase + live map** | Synced table and Streamlit map | Map meets NFR-1 and NFR-2; fading visible after stopping the pipeline. |
 | **4. Analytics views** | Punctuality board, heatmap, health strip, Genie chat tab (FR-12) | Slider changes results; coverage warnings appear after an induced gap; the chat answers "is tram N on time?" with the right lateness sign and says "not published" for metro. |
 | **5. Package + publish** | Demo jobs, AI/BI dashboard (FR-11), Rider Reports and My Routes (FR-13, FR-14), README, blog draft | `databricks bundle run demo_session` starts a working app and stops everything after 20 min; a Rider Report written in the app shows on the map and appears in `lb_rider_reports_history`; My Routes survive an app restart; the README lists the steps for another workspace. |
+| **6. Agents** | Bike, walk or wait (FR-15) first (your choice, 2026-10-08), then Bunching spotter (FR-16) | Bunching rules pass unit tests on the fixtures and a live demo lists at least one bunched pair with Headway; the FR-15 agent gives a sensible answer in a live demo for a late tram in dry and in rainy/windy weather (forced through config), drops the bike outside the season, and degrades readably when an outside API is down. Q3–Q5 closed. |
 
 ---
 
@@ -232,5 +268,10 @@ hsl_live_transit/
 | R6 | HSL GTFS URL or licence changes | URL is config. Data is CC BY 4.0: attribute HSL in app and blog. |
 | R7 | **Found in Phase 0 (2026-09-26):** paho-mqtt's `loop_start()` builds its internal wake-up pipe via loopback TCP (`127.0.0.1` listen/accept). The Standard-access-mode sandbox blocks this, so it hangs forever in `accept()`; serverless likely has the same sandbox. Network egress to `mqtt.hsl.fi` on 8883 and 443 itself is fine. | Replace `paho.mqtt.client._socketpair_compat` with an AF_UNIX `socket.socketpair()` (done in the spike module; verified on a DBR 17.3 Standard cluster). Carry into `src/hsl_mqtt_source/` with a comment and pin the paho version. |
 | R8 | **Found in Phase 0 (2026-09-26):** on Standard access mode (Spark Connect), the Python Data Source runs in a separate worker process that cannot import modules from workspace folders, so it fails with `PYTHON_DATA_SOURCE_ERROR … ModuleNotFoundError`. | Ship the module by value with `pyspark.cloudpickle.register_pickle_by_value(module)` before `spark.dataSource.register(...)`. Module-level side effects (e.g. the R7 patch) don't run in the worker, so they must happen inside functions. For production, package `src/hsl_mqtt_source/` as a wheel installed on the compute instead. Verified: ~1,750 rows per 5 s micro-batch on DBR 17.3 Standard. |
+| R9 | **FR-15:** outside APIs (Digitransit, FMI) may be slow, rate-limited or change | Short timeouts and readable fallbacks (FR-15.6); endpoints and stored queries are config. |
+| R10 | **FR-15:** city bikes run April–October only, so the bike option is unavailable for half the year | FR-15.5 drops the bike with a reason; the blog demo needs a run within the season (ends 2026-10-31). |
 | Q1 | Should the demo-session job also start/stop the SQL warehouse and app compute? | **Closed (Phase 5):** it starts and stops the ingestion pipeline, the Lakebase sync and the app; the warehouse auto-stops (NFR-4). |
 | Q2 | Stop Events carry `ttarr`/`ttdep`; in samples `dl` did not match `tst − ttdep`. Should Stop Event lateness be computed from `ttdep` instead of `-dl`? | **Closed (Phase 2):** both kept, ADR-0005. Lateness stays −`dl`; `timetable_lateness_s` is added next to it. See docs/findings/Q2_STOP_EVENT_LATENESS.md. |
+| Q3 | **FR-15, FR-16:** when is the next tram due at a Stop? We don't load GTFS `stop_times` (~1 GB) and silver doesn't parse `next_stop` from the topic. | **Closed 2026-10-08:** the Digitransit planner gives the tram trip with HSL's real-time departure; our measured Lateness for the same journey is shown beside it. |
+| Q4 | **FR-15:** which FMI forecast to use (stored query, model, resolution), or a different source such as Open-Meteo? | **Closed 2026-10-08:** FMI edited forecast, hourly (§3.4). Open-Meteo has 15-min steps but FMI is the local official source. |
+| Q5 | **FR-15, FR-16:** where do the agents run? | **Closed 2026-10-08:** tools as UC functions (ADR-0007). The Supervisor Agent and Claude endpoints are gated on our account, so a tool-calling loop in the app runs them (ADR-0008). |

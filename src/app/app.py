@@ -1,6 +1,6 @@
 """HSL Live Transit: live map (FR-7), punctuality board (FR-8), stop lateness (FR-9),
-health strip (FR-10), Ask (FR-12), Rider Reports (FR-13) and My Routes (FR-14) for Helsinki
-trams and metro.
+health strip (FR-10), Ask (FR-12), Rider Reports (FR-13), My Routes (FR-14) and the Bike, walk or
+wait agent (FR-15) for Helsinki trams and metro.
 
 The live map reads Lakebase; analytics read Delta through the SQL Warehouse (ADR-0003). Rider
 Reports and My Routes are written to app-owned Lakebase tables (ADR-0006).
@@ -10,6 +10,7 @@ import datetime as dt
 import html
 import math
 import os
+import types
 from zoneinfo import ZoneInfo
 
 import altair as alt
@@ -82,6 +83,15 @@ def genie():
     from genie import Genie
 
     return Genie()
+
+
+@st.cache_resource
+def agent():
+    from agent import Agent, endpoint_invoke
+
+    # Genie is created on its first use, so the agent works without a Genie space.
+    history = types.SimpleNamespace(ask=lambda question: genie().ask(question))
+    return Agent(endpoint_invoke(), warehouse(), history if os.getenv("GENIE_SPACE_ID") else None)
 
 
 def utc_now():
@@ -773,6 +783,134 @@ def ask_tab():
     chat.extend([("user", question), ("assistant", answer)])
 
 
+# ---------------------------------------------------------------- FR-15 Bike, walk or wait
+
+CHOICE_LABEL = {"wait": "🚋 Wait for the tram", "walk": "🚶 Walk", "bike": "🚲 Take a city bike", "none": "🤷 No advice"}
+AGENT_EXAMPLES = [
+    "I'm at Kaivopuisto going to Rautatientori. Should I take a city bike?",
+    "Is tram 4 late right now?",
+    "Will it rain at Hakaniemi in the next hour?",
+]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_tram_stop_names():
+    wh = warehouse()
+    df = wh.query(f"SELECT DISTINCT stop_name FROM {wh.table('silver_stops')} WHERE hsl_vehicle_type = 0")
+    return sorted(df["stop_name"])
+
+
+def minutes(v):
+    return "–" if v is None or pd.isna(v) else f"{int(v)} min"
+
+
+def show_advice(row):
+    """The bike_walk_or_wait result as a card (FR-15.1, FR-15.4)."""
+    st.markdown(f"### {CHOICE_LABEL.get(row['choice'], row['choice'])}")
+    st.write(row["reason"].capitalize())
+    c1, c2, c3 = st.columns(3)
+    tram = f"Tram {row['tram_route']}" if row["tram_route"] else "Tram"
+    c1.metric(f"{tram}: arrive in", minutes(row["tram_arrives_in_min"]),
+              help=f"Leaves in {minutes(row['tram_departs_in_min'])} (HSL real-time: "
+              f"{'yes' if row['tram_departure_realtime'] else 'no'}).")
+    c2.metric("Walk: arrive in", minutes(row["walk_arrives_in_min"]))
+    c3.metric("City bike: arrive in", minutes(row["bike_arrives_in_min"]),
+              help="Off season or no free bike or dock nearby." if pd.isna(row["bike_arrives_in_min"]) else None)
+    lateness = row["measured_lateness_s"]
+    if lateness is None or pd.isna(lateness):
+        st.caption("Our measured Lateness for this tram: unknown right now (FR-15.4).")
+    else:
+        st.caption(f"Our measured Lateness for this tram: {int(lateness):+d} s "
+                   f"(seen {ago(row['measured_age_s'])}).")
+    if row["bike_station"]:
+        st.caption(f"Bike from {row['bike_station']} ({int(row['bikes_available'])} bikes) "
+                   f"to {row['dock_station']} ({int(row['docks_free'])} free docks).")
+    if row["precipitation_mm_h"] is not None and not pd.isna(row["precipitation_mm_h"]):
+        st.caption(f"Next hour: rain {row['precipitation_mm_h']:.1f} mm/h, chance of rain "
+                   f"{row['rain_probability_pct']:.0f} %, gusts {row['gust_ms']:.0f} m/s, "
+                   f"{row['temperature_c']:.0f} °C.")
+    if row["problems"]:
+        st.warning(f"Missing: {row['problems']}")
+
+
+def show_reply(r):
+    if r.error:
+        st.error(f"The agent couldn't answer: {r.error}")
+    if r.text:
+        st.markdown(r.text)
+    if r.calls:
+        with st.expander("Tools the agent used"):  # like FR-12.4: show how the answer was made
+            for c in r.calls:
+                st.markdown(f"**{c.name}**(`{', '.join(f'{k}={v!r}' for k, v in c.args.items())}`)")
+                if c.error:
+                    st.caption(f"Error: {c.error}")
+                if c.table is not None and not c.table.empty:
+                    st.dataframe(c.table, hide_index=True, use_container_width=True)
+
+
+def advice_tab():
+    st.subheader("Bike, walk or wait")
+    st.caption(
+        "Is the tram worth waiting for? Compares the next tram (HSL real-time) with walking and a city "
+        "bike, and checks the weather. Fixed rules make the choice; nothing about you is stored."
+    )
+    if not os.getenv("AGENT_ENDPOINT"):
+        st.info("The agent isn't configured: the app has no AGENT_ENDPOINT.")
+        return
+    try:
+        names = load_tram_stop_names()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not load Stops: {e}")
+        return
+    with st.form("advice"):
+        c1, c2 = st.columns(2)
+        start = c1.selectbox("I'm at (tram Stop)", names, index=None, placeholder="e.g. Kaivopuisto", key="advice_from")
+        end = c2.selectbox("Going to", names, index=None, placeholder="e.g. Rautatientori", key="advice_to")
+        go = st.form_submit_button("Advise me")
+    if go and start and end:
+        with st.spinner("Checking trams, city bikes and weather…"):
+            try:
+                wh = warehouse()
+                df = wh.query(f"SELECT * FROM {wh.prefix}.bike_walk_or_wait(:a, :b)", {"a": start, "b": end})
+            except Exception as e:  # noqa: BLE001 - FR-15.6
+                st.error(f"Could not get advice: {str(e)[:300]}")
+                df = None
+        if df is not None and not df.empty:
+            row = df.iloc[0].to_dict()
+            print(f"advice choice={row['choice']} reason={row['reason']!r}")  # FR-15.7: outcome only
+            show_advice(row)
+    elif go:
+        st.info("Pick both Stops.")
+
+    st.divider()
+    st.markdown("**Ask the agent**")
+    st.caption("It uses the same tools, plus Genie for history. Model: " + os.getenv("AGENT_ENDPOINT", ""))
+    chat = st.session_state.setdefault("agent_history", [])
+    for role, content in chat:
+        with st.chat_message(role):
+            if role == "assistant":
+                show_reply(content)
+            else:
+                st.markdown(content)
+    cols = st.columns(len(AGENT_EXAMPLES))
+    picked = next((q for c, q in zip(cols, AGENT_EXAMPLES) if c.button(q, key=f"agent_ex_{q}")), None)
+    question = st.chat_input("e.g. I'm at Hakaniemi going to Kallio, should I walk?", key="agent_input") or picked
+    if not question:
+        return
+    turns = [
+        {"role": role, "content": content if role == "user" else content.text}
+        for role, content in chat
+        if role == "user" or content.text
+    ]
+    with st.chat_message("user"):
+        st.markdown(question)
+    with st.chat_message("assistant"):
+        with st.spinner("The agent is calling its tools…"):
+            reply = agent().ask(question, turns)
+        show_reply(reply)
+    chat.extend([("user", question), ("assistant", reply)])
+
+
 # ---------------------------------------------------------------- layout
 
 st.title("HSL Live Transit")
@@ -804,10 +942,16 @@ with st.sidebar:
     if st.button("New Ask conversation"):
         st.session_state.pop("ask_conversation", None)
         st.session_state["ask_history"] = []
+        st.session_state["agent_history"] = []
     st.divider()
-    st.caption("Data: Helsinki Region Transport (HSL), CC BY 4.0. digitransit.fi")
+    st.caption(
+        "Data: Helsinki Region Transport (HSL), CC BY 4.0. digitransit.fi. "
+        "Weather: Finnish Meteorological Institute, CC BY 4.0."
+    )
 
-tab_map, tab_punct, tab_stops, tab_ask = st.tabs(["Live map", "Punctuality", "Stop Lateness", "Ask"])
+tab_map, tab_punct, tab_stops, tab_ask, tab_advice = st.tabs(
+    ["Live map", "Punctuality", "Stop Lateness", "Ask", "Bike, walk or wait"]
+)
 with tab_map:
     live_map(modes, routes, tuple(watched), only_mine)
     report_panel()
@@ -817,3 +961,5 @@ with tab_stops:
     stops_tab()
 with tab_ask:
     ask_tab()
+with tab_advice:
+    advice_tab()

@@ -58,6 +58,14 @@ _Avoid_: Punctual, on schedule
 The share of departure Stop Events in a period that were on-time. Exists for trams only.
 _Avoid_: OTP, reliability
 
+**Headway**:
+The time between two consecutive Vehicles of the same Route and direction departing the same Stop, measured from departure Stop Events. Trams only.
+_Avoid_: Gap, spacing, interval
+
+**Bunching**:
+Two consecutive Vehicles of the same Route and direction whose Headway is far below the scheduled headway, so they travel almost together and leave a long wait behind them.
+_Avoid_: Platooning, clustering
+
 ### Live map
 
 **Freshness**:
@@ -87,3 +95,9 @@ _Avoid_: Outage, downtime (those describe HSL, not us)
 **Coverage**:
 The fraction of a time window that falls inside ingestion sessions. Every aggregate shown to a viewer carries its coverage.
 _Avoid_: Completeness, uptime
+
+### Outside data
+
+**City Bike Station**:
+An HSL city bike dock location with live counts of available bikes and free docks, from the Digitransit API. Not a Stop.
+_Avoid_: Bike stop, dock, rack

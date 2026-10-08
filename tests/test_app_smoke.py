@@ -1,4 +1,4 @@
-"""Runs src/app/app.py headless against fake Lakebase, SQL Warehouse and Genie backends.
+"""Runs src/app/app.py headless against fake Lakebase, SQL Warehouse, Genie and agent-model backends.
 
 Run with the Streamlit version of the Databricks Apps runtime (1.38), which is older than PyPI's:
     uv run --no-project --with pytest --with streamlit==1.38.0 --with pydeck --with pandas --with databricks-sdk python -m pytest tests/test_app_smoke.py
@@ -97,6 +97,8 @@ class FakeLakebase:
 class FakeWarehouse:
     """Answers each analytics query by recognising the table and columns it asks for."""
 
+    prefix = "cat.sch"
+
     def __init__(self, coverage_s=600.0, live=True):
         self.coverage_s = coverage_s
         self.live = live
@@ -161,7 +163,37 @@ class FakeWarehouse:
             )
         if "silver_routes" in statement:
             return pd.DataFrame({"route": ["10", "4", "1"]})
+        if "hsl_vehicle_type = 0" in statement:
+            return pd.DataFrame({"stop_name": ["Rautatientori", "Kaivopuisto"]})
+        if "bike_walk_or_wait(" in statement:
+            return pd.DataFrame([ADVICE])
         raise AssertionError(f"unexpected query: {statement}")
+
+
+ADVICE = {
+    "choice": "wait", "reason": "the tram gets you there in 20 min; no bike: gusts up to 13 m/s are forecast",
+    "from_stop": "Kaivopuisto", "to_stop": "Rautatientori", "tram_route": "3", "tram_direction": "1",
+    "tram_departs_in_min": 2, "tram_arrives_in_min": 20, "tram_departure_realtime": True,
+    "measured_lateness_s": None, "measured_age_s": None, "feed_live": False,
+    "walk_arrives_in_min": 25, "bike_arrives_in_min": 16, "bike_station": "Laivasillankatu",
+    "bikes_available": 4.0, "dock_station": "Porthania", "docks_free": 17.0, "precipitation_mm_h": 0.0,
+    "rain_probability_pct": 4.0, "gust_ms": 12.9, "temperature_c": 12.4, "in_bike_season": True,
+    "problems": "our HSL feed is not running, so measured Lateness is unknown",
+}  # fmt: skip
+
+
+def fake_invoke(messages, tools):
+    """A model that calls bike_walk_or_wait once, then answers from the tool result."""
+    if messages[-1]["role"] == "tool":
+        return {"role": "assistant", "content": "Wait for the tram: gusts are too strong for a bike."}
+    if "boom" in messages[-1]["content"]:
+        raise RuntimeError("endpoint unavailable")
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "bike_walk_or_wait", "arguments": '{"from_stop": "Kaivopuisto", "to_stop": "Rautatientori"}'}}],
+    }  # fmt: skip
 
 
 @pytest.fixture
@@ -179,7 +211,11 @@ def run_app(monkeypatch):
             monkeypatch.setenv("GENIE_SPACE_ID", genie_space)
         else:
             monkeypatch.delenv("GENIE_SPACE_ID", raising=False)
+        monkeypatch.setenv("AGENT_ENDPOINT", "fake-model")
         monkeypatch.syspath_prepend(str(APP_DIR))
+        import agent
+
+        monkeypatch.setattr(agent, "endpoint_invoke", lambda endpoint=None: fake_invoke)
         import streamlit as st
         from streamlit.testing.v1 import AppTest
 
@@ -200,7 +236,7 @@ def test_app_renders_without_exceptions(run_app):
     assert metrics["Fresh (≤ 30 s)"] == "2"
     assert metrics["Punctuality, all tram routes"] == "83%"  # (5 + 15 + 30) / 60
     assert metrics["Departures"] == "60"
-    assert [t.label for t in at.tabs] == ["Live map", "Punctuality", "Stop Lateness", "Ask"]
+    assert [t.label for t in at.tabs] == ["Live map", "Punctuality", "Stop Lateness", "Ask", "Bike, walk or wait"]
 
 
 def test_low_coverage_warns(run_app):
@@ -298,3 +334,25 @@ def test_my_routes_strip_and_saving(run_app):
 def test_anonymous_viewer_cannot_report(run_app):
     at, _ = run_app(viewer=None)
     assert any("Sign in through Databricks to send Rider Reports" in i.value for i in at.info)
+
+
+def test_advice_form_shows_the_rule_choice(run_app):
+    at, wh = run_app()
+    at.selectbox(key="advice_from").set_value("Kaivopuisto")
+    at.selectbox(key="advice_to").set_value("Rautatientori")
+    next(b for b in at.button if b.label == "Advise me").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Wait for the tram" in m.value for m in at.markdown)
+    assert any("unknown right now" in c.value for c in at.caption)  # FR-15.4
+    sent = [p for q, p in wh.queries if "bike_walk_or_wait(" in q]
+    assert sent[-1] == {"a": "Kaivopuisto", "b": "Rautatientori"}
+
+
+def test_agent_chat_answers_and_survives_endpoint_errors(run_app):
+    at, _ = run_app()
+    at.chat_input(key="agent_input").set_value("I'm at Kaivopuisto, bike to Rautatientori?").run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("gusts are too strong" in m.value for m in at.markdown)
+    at.chat_input(key="agent_input").set_value("boom").run()
+    assert not at.exception
+    assert any("The agent couldn't answer" in e.value for e in at.error)

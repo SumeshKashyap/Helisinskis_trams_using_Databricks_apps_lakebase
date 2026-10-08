@@ -15,7 +15,7 @@ Planning files live in [claude_notes/](./claude_notes/): PROGRESS.md, REQUIREMEN
 - **Catalog is always `my_databricks_workspace`.** Never `main`. Project schema is `hsl_live_transit`; `hsl_spike` is Phase 0 only.
 - Databricks CLI: always `-p dev` (host `https://adb-7405611495879743.3.azuredatabricks.net`).
 - Use the vocabulary in [claude_notes/CONTEXT.md](./claude_notes/CONTEXT.md) for table, column and UI names (e.g. `lateness_s`, never `delay`). When a new domain term settles, add it there; it stays a glossary, never a spec.
-- Decisions that are hard to reverse, surprising and a real trade-off get an ADR in `docs/adr/` (next number: 0007). Don't silently contradict an existing ADR; supersede it.
+- Decisions that are hard to reverse, surprising and a real trade-off get an ADR in `docs/adr/` (next number: 0009). Don't silently contradict an existing ADR; supersede it.
 - Requirement IDs (FR-x, NFR-x, R-x, Q-x) in claude_notes/REQUIREMENTS.md are stable. Reference them in code comments and commits instead of restating them.
 - Don't leave pipelines running: this is on-demand. Stop continuous pipelines after testing and say so.
 - Known platform gotchas (paho sandbox hang, worker can't import workspace modules, stale sessions) are listed in claude_notes/PROGRESS.md. Read them before touching ingestion.

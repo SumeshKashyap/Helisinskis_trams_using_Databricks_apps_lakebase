@@ -39,6 +39,9 @@ variables:
   lakebase_project:
     description: Lakebase Autoscaling project id (live map serving, ADR-0003).
     default: hsl-live-transit
+  agent_endpoint:
+    description: Foundation Model API endpoint for the Bike, walk or wait agent (FR-15, ADR-0008). Claude endpoints need Partner-powered AI features.
+    default: databricks-gpt-oss-120b
   daily_job_pause_status:
     description: Schedule state of the daily GTFS + retention job.
     default: UNPAUSED

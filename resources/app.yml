@@ -1,7 +1,8 @@
 # Databricks App: live map (FR-7) from Lakebase only (FR-6.2); punctuality (FR-8), stop Lateness
-# (FR-9) and the health strip (FR-10) from the SQL Warehouse; Ask (FR-12) through Genie (ADR-0003).
+# (FR-9) and the health strip (FR-10) from the SQL Warehouse; Ask (FR-12) through Genie (ADR-0003);
+# Bike, walk or wait (FR-15): UC functions on the warehouse plus a Foundation Model endpoint (ADR-0008).
 # An app's compute runs while the app is started: stop it after a demo (NFR-4).
-# UC SELECT grants for the app's service principal: scripts/grant_app_access.py (NFR-6).
+# UC grants for the app's service principal: scripts/grant_app_access.py (NFR-6), after scripts/setup_agents.py.
 targets:
   dev:
     resources:
@@ -22,6 +23,8 @@ targets:
                 value_from: sql_warehouse
               - name: GENIE_SPACE_ID
                 value_from: genie_space
+              - name: AGENT_ENDPOINT
+                value_from: agent_model
               - name: UC_CATALOG
                 value: ${var.catalog}
               - name: UC_SCHEMA
@@ -44,3 +47,8 @@ targets:
                 name: HSL Live Transit
                 space_id: ${resources.genie_spaces.hsl_ask.id}
                 permission: CAN_RUN
+            - name: agent_model
+              description: Bike, walk or wait agent (FR-15).
+              serving_endpoint:
+                name: ${var.agent_endpoint}
+                permission: CAN_QUERY

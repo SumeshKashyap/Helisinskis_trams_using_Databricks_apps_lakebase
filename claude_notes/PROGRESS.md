@@ -3,7 +3,7 @@
 > **Resume here.** Read this file top to bottom, then do the first unchecked item under [Next step](#next-step).
 > Update it at the end of every working session: move finished items to the log, rewrite "Next step".
 
-**Last updated:** 2026-10-03 (end of day) · **Current phase:** 5 — Package + publish: everything is built and deployed; open work is the ingestion cost measurement, your checks and the blog review · **Phases 0–4:** ✅ done
+**Last updated:** 2026-10-08 · **Current phase:** 5 — Package + publish (open: cost measurement, your checks, blog review); **Phase 6 — Agents**: FR-15 built and deployed (UC function tools + in-app agent loop, ADR-0007/0008), waiting for your check; FR-16 not started · **Phases 0–4:** ✅ done
 
 ---
 
@@ -32,7 +32,7 @@
 | Project pipeline | `hsl_live_transit`, id `55ff44d7-ba9f-4fde-998b-3f284abf99d0`, serverless, continuous: **stop it after every test** |
 | Daily job | `hsl_daily_hsl_live_transit` (GTFS load + retention), 09:00 Helsinki, **unpaused**. Raw GTFS in volume `hsl_live_transit.raw/gtfs/` |
 | Lakebase | project `hsl-live-transit` (PG 17, 0.5–2 CU, suspends after 5 min idle), branch `production`, endpoint `primary`, database `databricks_postgres`. Synced table `my_databricks_workspace.hsl_live_transit.gold_vehicle_current_online` (Postgres `hsl_live_transit.gold_vehicle_current_online`), continuous; its pipeline `25caa1d7-d217-45d6-ac50-0494a283f44e` is **stopped** |
-| App | `hsl-live-transit`, https://hsl-live-transit-7405611495879743.3.azure.databricksapps.com, Streamlit, **stopped**. After a new Lakebase schema or a recreated UC table, rerun `scripts/grant_app_access.py` (Lakebase + UC grants; `--skip-lakebase` for UC only) |
+| App | `hsl-live-transit`, https://hsl-live-transit-7405611495879743.3.azure.databricksapps.com, Streamlit, **stopped** (except during checks). Tab "Bike, walk or wait" (FR-15) uses model endpoint `databricks-gpt-oss-120b` (bundle variable `agent_endpoint`). After a new Lakebase schema or a recreated UC table, rerun `scripts/grant_app_access.py` (Lakebase + UC grants; `--skip-lakebase` for UC only) |
 | SQL Warehouse | `hsl-live-transit-analytics`, id `101db38ca6419b45`, serverless 2X-Small, auto-stop 5 min (bundle `resources/warehouse.yml`). Analytics views, health strip and Genie |
 | Genie space | `HSL Live Transit`, id `01f1bf6086e110a18fb46a002c7a8b9f` (bundle `resources/genie.yml`). Instructions and example SQL live in the YAML; redeploy to change them |
 | Demo jobs | `hsl_demo_session_hsl_live_transit` (`databricks bundle run demo_session -t dev [--params max_minutes=N]`, default 20 min) and `hsl_demo_stop_hsl_live_transit` (`bundle run demo_stop`). Script `src/jobs/demo.py` |
@@ -43,6 +43,7 @@
 | Spike schema | `my_databricks_workspace.hsl_spike`: volume `raw`, table `spike_bronze_notebook` (`spike_bronze_pipeline` and its pipeline `hsl_phase0_spike_c2` deleted 2026-10-03) |
 | Test fixtures | `/Volumes/my_databricks_workspace/hsl_spike/raw/hfp_samples/20260926T182830Z/` (212,662 lines on disk; PHASE0_RESULTS' 212,892 counts 230 messages that never reached a file. 10 min, JSONL) |
 | Workspace folder | `/Workspace/Users/sumesh.kashyap90@gmail.com/hsl_live_transit/scratchpad/` (spike notebook, module, pipeline file and analysis notebook; synced from the local `scratchpad/`) |
+| Agent tools (FR-15, ADR-0007) | UC functions in `hsl_live_transit`: `find_stop`, `weather_outlook`, `tram_lateness`, `parse_trip_options`, `trip_options`, `bike_walk_or_wait`, `decide_trip`. UC HTTP connections `hsl_fmi`, `hsl_digitransit`. Secret scope `hsl_live_transit`, key `digitransit_key` (your real key, added 2026-10-08). All created by `scripts/setup_agents.py --profile dev [--check] [--skip-agent]` |
 | Cluster | `Sumesh Kashyap's Cluster`, id `0926-172026-9fhkcdfl`, DBR 17.3, **Standard** access mode |
 
 ---
@@ -87,6 +88,12 @@
 23. **App command with a pre-step:** `sh -c "python init_db.py; exec streamlit run app.py --server.port $DATABRICKS_APP_PORT --server.address 0.0.0.0"`. Use `$VAR`, not `${VAR:-x}`: the bundle treats `${…}` as its own interpolation.
 24. **Lakebase `default_endpoint_settings` don't apply to the existing `primary` endpoint.** The bundle's `suspend_timeout_duration: 300s` left `primary` at 24 h, so it billed ~0.107 DBU/h (~$1.60/day) around the clock. Fixed 2026-10-03 with `databricks postgres update-endpoint … spec.suspend_timeout_duration` (command in `resources/lakebase.yml`); a redeploy keeps it. Check with `databricks postgres get-endpoint … | status.suspend_timeout_duration`.
 
+25. **UC Python functions have no network.** Outside APIs go through a SQL function with `http_request` and a UC HTTP connection (ADR-0007). `http_request` works in persisted SQL functions, and so does `secret()`.
+26. **`CREATE FUNCTION` checks that a `secret()` exists** (`INVALID_SECRET_LOOKUP`), so the setup script stores a placeholder first.
+27. **FMI's edited forecast has no `WindGust` value (always NaN).** Use `HourlyMaximumGust`; `PoP` is the chance of precipitation.
+28. **Supervisor Agent "is not available. To access this feature, please contact sales"** on this workspace (2026-10-08), even though the CLI and SDK have the API and `list` works.
+29. **Claude Foundation Model endpoints answer "temporarily disabled due to a Databricks-set rate limit of 0"** on this workspace; the open models (gpt-oss, Qwen, Llama) work, with tool calling. Same gate as gotcha 28, probably Partner-powered AI features (account console → Settings → Feature enablement).
+30. **Digitransit planner quirks:** `Leg.realtime` doesn't exist (use `start.estimated` ≠ null), and `BICYCLE_RENTAL` must be combined with `WALK` in `direct` modes. The API gateway refuses Python's default User-Agent (403); the UC connection's dummy bearer token is ignored.
 ---
 
 ## Next step
@@ -100,7 +107,14 @@ All of Phases 0–4 and the Phase 5 build are done: demo jobs, AI/BI dashboard, 
 - [ ] 5. **Your review of the blog draft** in the review doc https://claude.ai/code/artifact/d8d30498-4bed-441a-b3bb-0556e4bb661b. Since 2026-10-04 it holds the **story version** (`blog/hsl-live-transit-story.md`, with the diagram and all screenshots); comment there, and keep that repo file in sync with it. Repo link and five screenshots (`blog/screenshots/image1–5.png`) are in; rendered preview: https://claude.ai/artifact/3AjMhT8C1VVwUyMB9qbLAe. The review doc still has the old `[SCREENSHOT: …]` placeholders.
 - [ ] 6. Before publishing: the Lateness outliers (route 5T averaging about +10 min, route 2 about −18 min) and the Jokeri (route 15) departures without stop names (e.g. stop 1462402 has no `silver_stops` match).
 
-**Open questions:** none in REQUIREMENTS.md. Unverified by choice: the README's fresh-workspace caveat (synced table and Genie space need gold tables at deploy).
+- [ ] 7. **Phase 6 — FR-15 Bike, walk or wait: your check.** Built and deployed (ADR-0007 tools, ADR-0008 in-app loop). Checked live from here: the functions with the real Digitransit key (Kaivopuisto → Rautatientori gave "wait": tram 3H in 20 min, bike 16 min but gusts 13 m/s), and the agent loop on gpt-oss-120b with my credentials (right tool, kept the rule's choice, Lateness "unknown" with the feed off). **Not checked: the deployed app as its service principal** (Chrome extension wasn't connected). Grants are in place (`grant_app_access.py --skip-lakebase`).
+  - (a) **You:** open the app → tab "Bike, walk or wait": pick two tram Stops → "Advise me"; then ask the agent one of the example questions. If the form errors with a permission message, tell me the text. Then stop the app (`databricks apps stop hsl-live-transit -p dev`).
+  - (b) During a demo session (feed live), check that `measured_lateness_s` gets filled, i.e. the planner's journey (route|dir|oday|start) matches our `journey_id`. Trips after midnight may not match (GTFS times ≥ 24:00).
+  - (c) Optional: turn on Partner-powered AI features (account console). If Claude endpoints and the Supervisor Agent then work, set `agent_endpoint` to a Claude model and/or run `scripts/setup_agents.py` without `--skip-agent`.
+  - (d) README + blog section for FR-15; then FR-16 Bunching spotter.
+  - City bikes stop on 2026-10-31 (R10).
+
+**Open questions:** Q3–Q5 in REQUIREMENTS.md (Phase 6). Unverified by choice: the README's fresh-workspace caveat (synced table and Genie space need gold tables at deploy).
 
 ---
 
@@ -189,3 +203,17 @@ All of Phases 0–4 and the Phase 5 build are done: demo jobs, AI/BI dashboard, 
 - Review doc replaced with the story version (title, intro incl. your two new questions verbatim, 7 chapters, diagram + 5 screenshots uploaded to the doc, review checklist). Your intro edit in the repo file is not committed yet.
 - Community post drafted on community.databricks.com → Community Articles (Technical Blog is for employees/partners/customer orgs only). Subject, full story body (no review notes) and all 6 images loaded in the editor and auto-saved; **not posted**: you tick the CAPTCHA and click Post.
 - Community full-article post kept failing (invalid-HTML check), so the story went to **Medium** instead, published 2026-10-04: https://medium.com/@sumesh.kashyap90/following-helsinkis-trams-in-real-time-a-databricks-build-story-637ac9fa9ac6 (topics: Databricks, Data Engineering, Apache Spark, Real Time Analytics, PostgreSQL; intro typos fixed there and in the repo file). Short Databricks Community post (Community Articles) loaded in the editor: summary + GitHub + Medium links, labels Lakebase, Databricks Apps, Lakeflow, Genie, Structured Streaming, Unity Catalog. Waiting for you to tick the CAPTCHA and click Post.
+
+### 2026-10-08 — Agents planned (FR-15, FR-16)
+- Brainstormed agent ideas with you; you chose two: **Bike, walk or wait** (FR-15: our Lateness + nearest City Bike Stations + weather → wait/walk/bike) and **Bunching spotter** (FR-16: Headway between consecutive trams from departure Stop Events).
+- REQUIREMENTS.md: goal 7, non-goal wording, environment row, data sources §3.3 Digitransit and §3.4 FMI, FR-15, FR-16, NFR-6 (Digitransit key in a secret scope), Phase 6 in the delivery plan, R9, R10, open questions Q3–Q5. The rules decide the advice and the language model only calls tools and writes the answer (FR-15.3), so the logic stays unit-testable.
+- CONTEXT.md: Headway, Bunching, City Bike Station.
+- Nothing built or deployed; nothing running.
+
+- Later the same day (you chose FR-15 first; Q5 = UC functions + Agent Bricks; Q3 = Digitransit + our Lateness; Q4 = FMI): checked the APIs (FMI, CityBikes and Open-Meteo answer without a key; Digitransit needs one: 401). Proved that persisted SQL functions can call `http_request` and `secret()`, that UC Python functions can't use the network, that SQL table functions can call each other with LATERAL, and that Python UDFs can return STRUCT.
+- Built `src/agents/rules.py` (+ `tests/test_rules.py`, 14 pass), `src/agents/functions.sql`, `scripts/setup_agents.py`, ADR-0007. Created the connections, the secret scope (placeholder key) and the 7 functions, and checked them on the warehouse. A planner failure gives choice `none` with a readable reason.
+- Supervisor Agent creation refused (gotcha 28); you are checking Previews. Nothing is running (no pipeline was started; the warehouse auto-stops).
+- Evening: you added the Digitransit key and enabled a preview. Key verified (32 chars, real). Fixed the planner query from the real schema (gotcha 30); `bike_walk_or_wait` works live end to end.
+- Supervisor Agent still refused, and every Claude endpoint is at "rate limit of 0" (gotchas 28, 29); workspace is in Azure Germany West Central. You chose the in-app loop: ADR-0008 supersedes the agent-host half of ADR-0007; CLAUDE.md next ADR 0009.
+- `src/app/agent.py` (loop over `/serving-endpoints/<name>/invocations`, tools = UC functions as parameterised queries + Genie, 6 rounds max, errors become readable replies), new app tab "Bike, walk or wait" (form + agent chat + "Tools the agent used" expander), FMI credit in the sidebar. Bundle: variable `agent_endpoint`, app resource `agent_model` (CAN_QUERY) → env `AGENT_ENDPOINT`. `grant_app_access.py` grants the agent functions, connections and secret READ. `setup_agents.py` reuses `agent.SYSTEM_PROMPT`.
+- Tests: 62 pass (new `tests/test_agent.py`, smoke tests for the form and the agent chat). Deployed; pipelines stayed IDLE; grants run; app started and **left RUNNING for your check** (item 7a).
